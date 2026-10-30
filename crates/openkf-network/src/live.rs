@@ -587,6 +587,11 @@ impl LiveClient {
                         _ => 0,
                     };
                     let port = self.server.port();
+                    // Close any game connection left open by a previous run (crash / kill),
+                    // as the retail client does on disconnect, before starting a new one.
+                    if let Some(s) = self.steam.as_ref() {
+                        s.terminate(ip, port);
+                    }
                     match self.steam.as_ref().map(|s| s.initiate(server_id, ip, port, secure)) {
                         Some(Ok((buf, n))) => {
                             self.log.push(format!("steam: InitiateGameConnection -> {n} bytes"));
@@ -690,6 +695,15 @@ impl LiveClient {
             }
             "FAILURE" | "FAILCODE" | "UPGRADE" => self.state = LiveState::Failed,
             _ => {}
+        }
+    }
+}
+
+impl Drop for LiveClient {
+    /// Ends the Steam game connection (retail `TerminateGameConnection` on disconnect).
+    fn drop(&mut self) {
+        if let (Some(s), std::net::IpAddr::V4(v)) = (self.steam.as_ref(), self.server.ip()) {
+            s.terminate(u32::from(v), self.server.port());
         }
     }
 }

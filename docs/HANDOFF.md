@@ -15,3 +15,9 @@
 2. Particle emitters / decals; Karma ragdolls.
 3. Server browser in the viewer (code in `openkf-app::steam_matchmaking`).
 4. Benchmarks retail vs OpenKF: RAM, CPU %, cores/threads used, map load time, FPS solo and multiplayer (same map, same camera path, same resolution), publish method + raw data in README.
+
+## Update (end of session)
+- `steam_appid.txt` found in `KillingFloor\System` and renamed to `steam_appid.txt.openkf-bak` (not the cause).
+- Retail client joins the public test server fine; OpenKF gets STEAMENCRYPTIONKEY + CHALLENGE, sends AUTH/LOGIN, then the server stays silent (no WELCOME). Name is not the cause.
+- Added `TerminateGameConnection` before `InitiateGameConnection` and on client drop (retail behaviour); live verification pending.
+- Next: record a retail join with `openkf-netcap` (relay) and diff the AUTH / LOGIN / Steam blob messages against OpenKF's (the STEAMTICKET chunks with SIZE=1 are a suspect).
