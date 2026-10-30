@@ -13,7 +13,10 @@
 //! Replay: P pause, R restart, F follow the player's pawn, +/- speed.
 
 mod assets;
+mod browser;
 mod camera;
+mod particles;
+mod ragdoll;
 mod render;
 mod replay;
 mod live_view;
@@ -51,6 +54,8 @@ struct Args {
     name: String,
     ready: bool,
     play: bool,
+    browse: bool,
+    bench: usize,
 }
 
 fn parse_args() -> Args {
@@ -70,6 +75,8 @@ fn parse_args() -> Args {
         name: "OpenKF".into(),
         ready: true,
         play: false,
+        browse: false,
+        bench: 0,
     };
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -87,6 +94,8 @@ fn parse_args() -> Args {
             "--no-zeds" => a.zeds = false,
             "--replay" => a.replay = Some(PathBuf::from(it.next().expect("--replay <capture.txt>"))),
             "--connect" => a.connect = Some(it.next().expect("--connect host:port")),
+            "--browse" => a.browse = true,
+            "--bench" => a.bench = it.next().expect("--bench <frames>").parse().unwrap(),
             "--auth" => a.auth = PathBuf::from(it.next().expect("--auth <capture>")),
             "--name" => a.name = it.next().expect("--name <player>"),
             "--no-ready" => a.ready = false,
@@ -210,6 +219,7 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
     let t = Instant::now();
     let mut scene = scene::load_scene(&args.kf, &args.map, bc, args.zeds, rp.map(|r| r.pool.as_slice()).or(live.map(|_| live_pool.as_slice()))).unwrap_or_else(|e| fatal_map(&args.map, &e));
     println!("[Scene] {}", scene.stats);
+    println!("[SceneLoad] {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let mut cam_override = None;
     if let Some(rp) = rp {
         // --time = seconds since replay start; camera above the player's pawn.
@@ -284,6 +294,8 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
             used[p.mesh] += 1;
             a.location = p.loc;
             a.yaw = p.yaw;
+            a.pitch = p.pitch;
+            a.roll = p.roll;
             a.apply_pawn_anim(p);
             println!("[Live] pawn {} at {:?} speed {:.0} anim {} action {:?} dying {:?}", live_pool[p.mesh].1, p.loc.map(|x| x as i32), p.speed, a.rig.anim.as_ref().and_then(|x| x.sequences.get(a.seq)).map(|q| q.name.clone()).unwrap_or_default(), p.action, p.dying);
             for (k, v) in sum.iter_mut().enumerate() { *v += p.loc[k]; }
@@ -384,9 +396,51 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
         println!("[Actor] {} playing {} | {} verts, {nan} NaN, bones mapped {mapped}/{}, extent {:?}..{:?}", a.name, a.seq_name, v.len(), a.rig.mesh.bones.len(), mn.map(|x| x as i32), mx.map(|x| x as i32));
     }
     println!("[Skin] {} actors skinned in {skin_ms:.2} ms (parallel)", scene.actors.len());
+    // Benchmark: orbit the camera 360 degrees over N frames, timing each.
+    if args.bench > 0 {
+        // Warm up (pipeline + caches) before measuring.
+        r.render(&device, &queue, &view, w, h, &cam);
+        device.poll(wgpu::Maintain::Wait);
+        let mut dts: Vec<f64> = Vec::with_capacity(args.bench);
+        let total = Instant::now();
+        for i in 0..args.bench {
+            let mut c = Camera { pos: cam.pos, yaw: cam.yaw + i as f32 * std::f32::consts::TAU / args.bench as f32, pitch: cam.pitch, fov_y: cam.fov_y };
+            let f0 = Instant::now();
+            let vv = zeds::skin_all(&mut scene.actors, args.time + i as f32 / 60.0);
+            r.update_actors(&queue, &vv);
+            if !scene.props.is_empty() {
+                let pv = props::transform_all(&scene.props);
+                r.update_props(&queue, &pv);
+            }
+            r.render(&device, &queue, &view, w, h, &c);
+            device.poll(wgpu::Maintain::Wait);
+            dts.push(f0.elapsed().as_secs_f64() * 1e3);
+            let _ = &mut c;
+        }
+        dts.sort_by(|a, b| a.total_cmp(b));
+        let sum: f64 = dts.iter().sum();
+        let avg = sum / dts.len() as f64;
+        let p50 = dts[dts.len() / 2];
+        let p95 = dts[(dts.len() as f64 * 0.95) as usize];
+        println!(
+            "[Bench] {} frames in {:.1} s: {:.0} FPS avg | frame ms avg {avg:.2} p50 {p50:.2} p95 {p95:.2} | {} draws {} tris",
+            args.bench,
+            total.elapsed().as_secs_f64(),
+            1000.0 / avg,
+            r.draw_calls(),
+            r.triangles
+        );
+    }
     r.render(&device, &queue, &view, w, h, &cam);
     if let Some(sh) = live {
         let s = sh.lock().unwrap();
+        if !s.particles.is_empty() {
+            if let Some(depth) = r.depth_texture() {
+                let pr = particles::ParticleRenderer::new(&device, fmt, 2048);
+                pr.draw(&device, &queue, &view, depth, &cam, w as f32 / h.max(1) as f32, &s.particles.parts);
+                println!("[Particles] {} live", s.particles.len());
+            }
+        }
         let mut hud = hud::Hud::new(&device, &queue, fmt);
         hud.draw(&device, &queue, &view, w, h, &[s.hud.clone(), format!("OPENKF LIVE  {}", args.map.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_default())], args.play);
     }
@@ -407,12 +461,12 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
     buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::Maintain::Wait);
     println!("[Frame] {:.1} ms, {} draw calls, {} triangles", t.elapsed().as_secs_f64() * 1e3, r.draw_calls(), r.triangles);
+    let Some(path) = args.screenshot.as_ref() else { return };
     let data = buf.slice(..).get_mapped_range();
     let mut px = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         px.extend_from_slice(&data[(y * row) as usize..(y * row + w * 4) as usize]);
     }
-    let path = args.screenshot.as_ref().unwrap();
     let f = std::fs::File::create(path).unwrap();
     let mut e = png::Encoder::new(std::io::BufWriter::new(f), w, h);
     e.set_color(png::ColorType::Rgba);
@@ -433,6 +487,7 @@ struct Gfx {
     config: wgpu::SurfaceConfiguration,
     renderer: render::Renderer,
     hud: hud::Hud,
+    particles: particles::ParticleRenderer,
 }
 
 struct App {
@@ -514,7 +569,8 @@ impl ApplicationHandler for App {
         let actors = std::mem::take(&mut scene.actors);
         let props = std::mem::take(&mut scene.props);
         let hud = hud::Hud::new(&device, &queue, format);
-        self.gfx = Some(Gfx { actors, props, start: Instant::now(), window, surface, device, queue, config, renderer, hud });
+        let parts = particles::ParticleRenderer::new(&device, format, 2048);
+        self.gfx = Some(Gfx { actors, props, start: Instant::now(), window, surface, device, queue, config, renderer, hud, particles: parts });
         self.last = Instant::now();
         self.fps_t = Instant::now();
     }
@@ -710,6 +766,8 @@ impl ApplicationHandler for App {
                         used[p.mesh] += 1;
                         a.location = p.loc;
                         a.yaw = p.yaw;
+                        a.pitch = p.pitch;
+                        a.roll = p.roll;
                         a.apply_pawn_anim(p);
                         slot_of[pi] = idx;
                     }
@@ -751,6 +809,13 @@ impl ApplicationHandler for App {
                 }
                 g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, cam);
                 if let Some(sh) = &self.live {
+                    let parts = sh.lock().unwrap().particles.clone();
+                    if !parts.is_empty() {
+                        if let Some(depth) = g.renderer.depth_texture() {
+                            let aspect = g.config.width as f32 / g.config.height.max(1) as f32;
+                            g.particles.draw(&g.device, &g.queue, &view, depth, &cam, aspect, &parts.parts);
+                        }
+                    }
                     let line = sh.lock().unwrap().hud.clone();
                     let controls = if self.args.play { "WASD MOVE  CLICK FIRE  R RELOAD  1-5 WEAPONS  G GRENADE  B BUY CLIP" } else { "SPECTATOR" };
                     g.hud.draw(&g.device, &g.queue, &view, g.config.width, g.config.height, &[line, controls.to_string()], self.args.play);
@@ -790,7 +855,20 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    let args = parse_args();
+    let mut args = parse_args();
+    // Server browser: pick from favorites / recents / typed address, then join it.
+    if args.browse && args.connect.is_none() {
+        match browser::pick() {
+            Some(addr) => args.connect = Some(addr),
+            None => {
+                eprintln!("no server selected");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(addr) = &args.connect {
+        browser::push_recent(addr);
+    }
     let replay = args.replay.as_ref().map(|p| replay::load(p, &args.kf).expect("replay"));
     let mut live = None;
     let mut live_map = None;
@@ -825,7 +903,7 @@ fn main() {
         let sh = live_view::start(addr, args.kf.clone(), auth, args.name.clone(), ready, Some(defaults), pool);
         if args.play {
             // Screenshot mode can't read the keyboard: walk towards +X, aim level (path test).
-            let fixed = live_view::Input { wish: if args.screenshot.is_some() { [1.0, 0.0] } else { [0.0, 0.0] }, ..Default::default() };
+            let fixed = live_view::Input { wish: if args.screenshot.is_some() || args.bench > 0 { [1.0, 0.0] } else { [0.0, 0.0] }, ..Default::default() };
             sh.lock().unwrap().input = Some(fixed);
         }
         let t = Instant::now();
@@ -853,7 +931,7 @@ fn main() {
         live = Some(sh);
     }
     let args = resolve_map(args, replay.as_ref().and_then(|r| r.map.as_deref()).or(live_map.as_deref()));
-    if args.screenshot.is_some() {
+    if args.screenshot.is_some() || args.bench > 0 {
         screenshot(&args, replay.as_ref(), live.as_ref(), live_pool_global.clone().unwrap_or_else(live_view::pool));
         return;
     }

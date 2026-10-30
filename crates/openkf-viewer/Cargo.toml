@@ -14,6 +14,7 @@ path = "src/main.rs"
 openkf-package = { path = "../openkf-package" }
 openkf-network = { path = "../openkf-network" }
 openkf-audio = { path = "../openkf-audio" }
+openkf-physics = { path = "../openkf-physics" }
 openkf-render = { path = "../openkf-render" }
 wgpu = "22.1"
 winit = "0.30"

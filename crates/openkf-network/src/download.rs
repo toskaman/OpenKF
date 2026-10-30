@@ -157,6 +157,22 @@ pub fn package_guid(path: &Path) -> Option<String> {
     Some(h[36..52].chunks(4).map(|c| format!("{:08X}", u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect())
 }
 
+/// `USES GUID=` (32 hex chars, 4 LE u32 printed `%08X`) -> 16 raw bytes.
+///
+/// This is the exact payload a retail client sends when it opens a
+/// `CHTYPE_FILE` channel: the package GUID as stored in the file summary.
+pub fn guid_to_bytes(guid: &str) -> Option<[u8; 16]> {
+    if guid.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..4 {
+        let w = u32::from_str_radix(&guid[8 * i..8 * i + 8], 16).ok()?;
+        out[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    Some(out)
+}
+
 /// `http://host[:port]/path/` -> (host, port, path prefix ending with '/').
 pub fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
     let rest = url.trim().strip_prefix("http://")?;
@@ -196,6 +212,12 @@ pub const MAX_DOWNLOAD: usize = 256 * 1024 * 1024;
 
 /// Minimal HTTP/1.0 GET (FastDL redirect servers are plain HTTP). Follows up to 3 redirects.
 pub fn http_get(url: &str, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
+    http_get_with_progress(url, timeout, &mut |_, _| {})
+}
+
+/// Same as [`http_get`], reporting `(received bytes, total or None)` while the
+/// body streams in (used for the download progress bar).
+pub fn http_get_with_progress(url: &str, timeout: std::time::Duration, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Vec<u8>, String> {
     use std::io::{Read, Write};
     use std::net::ToSocketAddrs;
     let mut url = url.to_string();
@@ -215,27 +237,44 @@ pub fn http_get(url: &str, timeout: std::time::Duration) -> Result<Vec<u8>, Stri
         s.set_write_timeout(Some(timeout)).ok();
         let req = format!("GET {path} HTTP/1.0\r\nHost: {hostport}\r\nUser-Agent: Unreal\r\nAccept: */*\r\nConnection: close\r\n\r\n");
         s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 64 * 1024];
-        loop {
+        // Read headers first so the body streams with progress.
+        let mut head_buf = Vec::new();
+        let mut chunk = [0u8; 8 * 1024];
+        let end = loop {
             let n = s.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
             if n == 0 {
-                break;
+                return Err("bad HTTP response".into());
             }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.len() > MAX_DOWNLOAD {
-                return Err("file too large".into());
+            head_buf.extend_from_slice(&chunk[..n]);
+            if head_buf.len() > 1 << 20 {
+                return Err("bad HTTP response".into());
             }
-        }
-        let end = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or("bad HTTP response")?;
-        let head = String::from_utf8_lossy(&buf[..end]).to_string();
+            if let Some(i) = head_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i;
+            }
+        };
+        let head = String::from_utf8_lossy(&head_buf[..end]).to_string();
         let status: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("bad status line")?;
         let header = |k: &str| head.lines().find_map(|l| l.split_once(':').filter(|(n, _)| n.trim().eq_ignore_ascii_case(k)).map(|(_, v)| v.trim().to_string()));
         match status {
             200 => {
-                let body = buf.split_off(end + 4);
-                if let Some(len) = header("Content-Length").and_then(|v| v.parse::<usize>().ok()) {
-                    if body.len() < len {
+                let total = header("Content-Length").and_then(|v| v.parse::<u64>().ok());
+                let mut body = head_buf.split_off(end + 4);
+                progress(body.len() as u64, total);
+                let mut chunk = [0u8; 64 * 1024];
+                loop {
+                    let n = s.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&chunk[..n]);
+                    if body.len() > MAX_DOWNLOAD {
+                        return Err("file too large".into());
+                    }
+                    progress(body.len() as u64, total);
+                }
+                if let Some(len) = total {
+                    if (body.len() as u64) < len {
                         return Err(format!("truncated: {} / {len} bytes", body.len()));
                     }
                 }
@@ -280,12 +319,25 @@ pub fn decompress_uz2(data: &[u8]) -> Result<Vec<u8>, String> {
 /// Downloads `fname` from a FastDL redirect (`<base>/<fname>[.uz2]`) into `download_dir`.
 /// The package GUID is checked against `expected_guid` when given. Returns the stored path.
 pub fn fetch_package(base: &str, compressed: bool, fname: &str, expected_guid: Option<&str>, dest_dir: &Path) -> Result<PathBuf, String> {
+    fetch_package_with_progress(base, compressed, fname, expected_guid, dest_dir, &mut |_, _| {})
+}
+
+/// Same as [`fetch_package`], reporting `(received, total)` while streaming.
+pub fn fetch_package_with_progress(
+    base: &str,
+    compressed: bool,
+    fname: &str,
+    expected_guid: Option<&str>,
+    dest_dir: &Path,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf, String> {
     let (host, port, path) = parse_http_url(base).ok_or_else(|| format!("bad redirect URL {base}"))?;
     let timeout = std::time::Duration::from_secs(45);
     // Redirect servers are often slow or rate-limited: one retry per URL.
-    let try_get = |name: &str| {
+    let mut try_get = |name: &str| {
         let url = format!("http://{host}:{port}{path}{}", url_encode(name));
-        http_get(&url, timeout).or_else(|e| if e.starts_with("HTTP 4") { Err(e) } else { http_get(&url, timeout) })
+        http_get_with_progress(&url, timeout, progress)
+            .or_else(|e| if e.starts_with("HTTP 4") { Err(e) } else { http_get_with_progress(&url, timeout, progress) })
     };
     // Servers advertise COMPRESSION=1 but some only host raw files: try both.
     let bytes = if compressed {
@@ -336,6 +388,16 @@ mod fastdl_tests {
     #[test]
     fn encodes_map_names() {
         assert_eq!(url_encode("KF-Space-Airlock[WSB].rom.uz2"), "KF-Space-Airlock%5BWSB%5D.rom.uz2");
+    }
+
+    #[test]
+    fn guid_bytes_roundtrip() {
+        // package_guid prints 4 LE u32; guid_to_bytes restores the 16 summary bytes.
+        let g = "00112233AABBCCDD0123456789ABCDEF";
+        let b = super::guid_to_bytes(g).unwrap();
+        assert_eq!(&b, &[0x33, 0x22, 0x11, 0x00, 0xDD, 0xCC, 0xBB, 0xAA, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xCD, 0xAB, 0x89]);
+        assert_eq!(super::guid_to_bytes("ZZZ"), None);
+        assert_eq!(super::guid_to_bytes("0011"), None);
     }
 
     #[test]

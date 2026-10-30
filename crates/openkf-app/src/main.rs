@@ -11,7 +11,7 @@ pub mod steam_stats;
 pub mod steam64;
 pub mod raw_input;
 pub mod steam_friends;
-pub mod steam_matchmaking;
+// Server browser lives in openkf-network::browser (shared with the viewer).
 pub mod input_bindings;
 
 const STEAM_APP_ID: u32 = 1250; // Killing Floor Retail Steam AppID

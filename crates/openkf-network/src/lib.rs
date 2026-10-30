@@ -33,6 +33,7 @@ pub mod handshake;
 pub mod download;
 pub mod live;
 pub mod steam;
+pub mod browser;
 
 pub use bitstream::{BitReader, BitWriter, UFBitReader, UFBitWriter};
 pub use bunch::{ChannelType, FInBunch, FOutBunch, MAX_CHANNELS};

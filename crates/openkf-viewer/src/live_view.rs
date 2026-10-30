@@ -121,6 +121,11 @@ pub struct PawnView {
     pub mesh: usize,
     pub loc: [f32; 3],
     pub yaw: i32,
+    /// Physics-driven orientation for ragdoll corpses (UE units).
+    pub pitch: i32,
+    pub roll: i32,
+    /// True while a Karma ragdoll drives this corpse (no death anim).
+    pub ragdoll: bool,
     pub speed: f32,
     /// Locomotion sequence for the current velocity (`MovementAnims(0..3)` /
     /// `WalkAnims` / `CrouchAnims` of the class, picked by direction vs. yaw).
@@ -291,6 +296,23 @@ pub struct Shared {
     pub failed: bool,
     pub reconnects: u32,
     pub status_extra: String,
+    /// Combat/ambient particles spawned by the live thread (UE coords).
+    pub particles: crate::particles::ParticleSystem,
+}
+
+/// One-line download progress for the HUD (font-safe chars only).
+pub fn download_hud_line(c: &LiveClient) -> Option<String> {
+    let (src, file, rx, tot, q) = c.download_progress()?;
+    let pct = if tot > 0 { (rx * 100 / tot).min(100) } else { 0 };
+    let filled = (pct as usize / 10).min(10);
+    let bar: String = "|".repeat(filled) + &"-".repeat(10 - filled);
+    Some(if tot >= 10 * 1_048_576 {
+        format!("DL {src} {file} {pct}% {}/{}MB {bar} {} LEFT", rx / 1_048_576, tot / 1_048_576, q)
+    } else if tot > 0 {
+        format!("DL {src} {file} {pct}% {}/{}KB {bar} {} LEFT", rx / 1024, tot / 1024, q)
+    } else {
+        format!("DL {src} {file} {}KB {bar} {} LEFT", rx / 1024, q)
+    })
 }
 
 pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: String, ready: bool, defaults: Option<Arc<ScriptDefaults>>, pool: Vec<(String, String, usize)>) -> Arc<Mutex<Shared>> {
@@ -356,9 +378,23 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
         let mut died_at: std::collections::HashMap<u32, Instant> = Default::default();
         let mut corpses: Vec<(PawnView, Instant)> = Vec::new();
         let mut last_pawns: Vec<PawnView> = Vec::new();
+        let mut last_dl_print = Instant::now() - Duration::from_secs(10);
+        let mut emitter_tick = Instant::now();
+        let mut part_tick = Instant::now();
+        let mut ragdolls: std::collections::HashMap<u32, crate::ragdoll::RagdollState> = Default::default();
         let t0 = Instant::now();
         loop {
             let evs = c.poll();
+            // Download progress bar (background FastDL / channel): console printout
+            // here, HUD override in the shared update below.
+            if c.downloading() {
+                if last_dl_print.elapsed() > Duration::from_secs(2) {
+                    if let Some(line) = download_hud_line(&c) {
+                        println!("[Download] {line}");
+                    }
+                    last_dl_print = Instant::now();
+                }
+            }
             // Damage diagnostics: HitDamageType / TakeHitLocation updates on our pawn.
             if let Some(pc) = c.pawn_channel() {
                 for e in &evs {
@@ -383,6 +419,10 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
             if local_fire {
                 local_fire = false;
                 view_anim = Some(("Fire".into(), Instant::now(), 0.0));
+                // Muzzle flash at chest height (facing unknown: spherical flash).
+                if let Some(me) = c.my_loc {
+                    sh.lock().unwrap().particles.burst([me[0], me[1], me[2] + 50.0], 6, [1.0, 0.85, 0.45, 0.9], 120.0, 0.15, 14.0, 0.0);
+                }
                 if let (Some(au), Some(d), Some(w), Some(me)) = (audio.as_mut(), defaults.as_deref(), weapon, c.my_loc) {
                     let cls = c.session.as_ref().and_then(|s| s.actors.get(&w)).map(|a| a.class.name.clone()).unwrap_or_default();
                     if let Some(snd_name) = fire_sound(d, &cls) {
@@ -427,12 +467,12 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                                     snd = members[(t0.elapsed().as_nanos() as usize / 7) % members.len()];
                                 }
                             }
-                            let ok = au.play(snd, || schema.and_then(|s| s.export_data(snd)), loc, radius, if vol > 0.0 { vol } else { 1.0 }, pitch);
-                            if !ok {
+                            let r = au.try_play(snd, || schema.and_then(|s| s.export_data(snd)), loc, radius, if vol > 0.0 { vol } else { 1.0 }, pitch);
+                            if let Err(why) = r {
                                 sounds_failed += 1;
-                                if sounds_failed <= 6 {
+                                if sounds_failed <= 12 {
                                     let what = c.session.as_ref().and_then(|s| s.schema.map.resolve(snd)).map(|o| format!("{}.{} ({})", o.package, o.name.unwrap_or("?"), o.class.unwrap_or("?")));
-                                    println!("[Audio] cannot play object {snd}: {what:?}");
+                                    println!("[Audio] cannot play object {snd}: {what:?} ({why:?})");
                                 }
                             }
                         }
@@ -455,10 +495,25 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                                     }
                                 }
                                 ("Health", Value::Int(h)) if *h <= 0 => {
-                                    died_at.entry(*ch).or_insert_with(Instant::now);
+                                    if died_at.get(ch).is_none() {
+                                        died_at.insert(*ch, Instant::now());
+                                        // Blood burst + ground decal at the corpse.
+                                        if let Some(a) = c.session.as_ref().and_then(|s| s.actors.get(ch)) {
+                                            let mut s = sh.lock().unwrap();
+                                            s.particles.burst(a.location, 24, [0.55, 0.03, 0.02, 0.95], 260.0, 0.9, 10.0, 1.0);
+                                            s.particles.decal([a.location[0], a.location[1], a.location[2] - 30.0], [0.25, 0.01, 0.01, 0.85], 46.0, 12.0);
+                                        }
+                                    }
                                 }
                                 ("bTearOff", Value::Bool(true)) => {
-                                    died_at.entry(*ch).or_insert_with(Instant::now);
+                                    if died_at.get(ch).is_none() {
+                                        died_at.insert(*ch, Instant::now());
+                                        if let Some(a) = c.session.as_ref().and_then(|s| s.actors.get(ch)) {
+                                            let mut s = sh.lock().unwrap();
+                                            s.particles.burst(a.location, 24, [0.55, 0.03, 0.02, 0.95], 260.0, 0.9, 10.0, 1.0);
+                                            s.particles.decal([a.location[0], a.location[1], a.location[2] - 30.0], [0.25, 0.01, 0.01, 0.85], 46.0, 12.0);
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -814,6 +869,28 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                     }
                 }
             }
+            // Ambient emitter smoke (throttled) + particle physics tick.
+            if emitter_tick.elapsed() > Duration::from_millis(120) {
+                emitter_tick = Instant::now();
+                if let Some(s) = &c.session {
+                    let mut n = 0;
+                    for a in s.actors.values().filter(|a| a.class.is_a("Emitter")) {
+                        if n >= 8 {
+                            break;
+                        }
+                        sh.lock().unwrap().particles.smoke(a.location, [0.45, 0.44, 0.42, 0.5], 26.0, 2.2);
+                        n += 1;
+                    }
+                }
+            }
+            {
+                let dt = part_tick.elapsed().as_secs_f32();
+                part_tick = Instant::now();
+                sh.lock().unwrap().particles.update(dt);
+                for r in ragdolls.values_mut().filter(|r| !r.settled()) {
+                    r.step(dt);
+                }
+            }
             let mut pawns: Vec<PawnView> = Vec::new();
             if let Some(s) = &c.session {
                 for a in s.actors.values() {
@@ -841,6 +918,9 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                         mesh: mi,
                         loc,
                         yaw,
+                        pitch: 0,
+                        roll: 0,
+                        ragdoll: false,
                         speed: v[0].hypot(v[1]),
                         move_anim: d.and_then(|d| movement_anim(d, cls, v, yaw, walking, crouched)),
                         idle_anim: d.and_then(|d| idle_anim(d, cls, crouched)),
@@ -852,11 +932,25 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                 }
             }
             died_at.retain(|ch, t| t.elapsed() < CORPSE_TIME || pawns.iter().any(|p| p.channel == *ch));
+            ragdolls.retain(|ch, _| died_at.contains_key(ch));
             last_pawns = pawns.clone();
             for (p, t) in &corpses {
                 if !pawns.iter().any(|q| q.channel == p.channel) {
                     pawns.push(PawnView { dying: Some(t.elapsed().as_secs_f32()), action: None, speed: 0.0, ..p.clone() });
                 }
+            }
+            // Karma ragdolls drive corpses whose class has no death animation.
+            for p in pawns.iter_mut().filter(|p| p.dying.is_some() && p.death_anims.is_empty()) {
+                let seed = (p.channel as u64).wrapping_mul(1_000_003).wrapping_add(t0.elapsed().as_micros() as u64);
+                let r = ragdolls
+                    .entry(p.channel)
+                    .or_insert_with(|| crate::ragdoll::RagdollState::spawn(p.loc, p.yaw, p.collision_height, seed));
+                let (loc, yaw, pitch, roll) = r.pose();
+                p.loc = loc;
+                p.yaw = yaw;
+                p.pitch = pitch;
+                p.roll = roll;
+                p.ragdoll = true;
             }
             // Movable static meshes: pickups and projectiles.
             let mut props = Vec::new();
@@ -975,6 +1069,12 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                 ));
                 let dosh_s = match &dosh { Some(Value::Float(f)) => format!("{f:.0}"), _ => "?".into() };
                 s.hud = format!("HP {health} | AMMO {ammo} | GRENADES {nades} | KILLS {kills} | WAVE {wave} | {dosh_s} POUNDS");
+                // While downloads hold the handshake, the HUD shows progress instead.
+                if c.downloading() {
+                    if let Some(dl) = download_hud_line(&c) {
+                        s.hud = dl;
+                    }
+                }
                 s.pawns = pawns;
                 let actors = c.session.as_ref().map_or(0, |s| s.actors.len());
                 s.status = format!(

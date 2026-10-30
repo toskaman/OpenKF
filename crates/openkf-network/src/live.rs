@@ -129,6 +129,49 @@ pub struct LiveClient {
     pub travel_url: Option<String>,
     /// Class defaults from the .uc sources (given to the ActorSession).
     pub defaults: Option<std::sync::Arc<openkf_package::uc_defaults::ScriptDefaults>>,
+    /// `Engine.ChannelDownload` offered by the server (`DLMGR`).
+    channel_dl_offered: bool,
+    /// Packages still missing after FastDL, queued for in-connection download.
+    file_queue: Vec<UsesLine>,
+    /// Active in-connection (`CHTYPE_FILE`) download, if any.
+    file_active: Option<FileActive>,
+    /// Next client-opened file channel index (high range, away from actor channels).
+    file_next_ch: u32,
+    /// `WELCOME` message held while channel downloads run (map announced after).
+    welcome_pending: Option<String>,
+    /// Background FastDL (HTTP) progress, shared with the download thread.
+    http_state: Option<std::sync::Arc<std::sync::Mutex<HttpProgress>>>,
+    /// Background FastDL thread handle (joined from `poll` when finished).
+    http_handle: Option<std::thread::JoinHandle<Vec<HttpResult>>>,
+}
+
+/// Live progress of the background FastDL thread (for the HUD progress bar).
+#[derive(Debug, Default, Clone)]
+pub struct HttpProgress {
+    /// Currently downloading: (file, received bytes, total or None).
+    pub current: Option<(String, u64, Option<u64>)>,
+    /// Files still queued behind the current one.
+    pub queued: usize,
+    /// Thread finished (results ready to join).
+    pub done: bool,
+}
+
+/// One background FastDL outcome: (file, guid, storage result).
+pub type HttpResult = (String, String, Result<PathBuf, String>);
+
+/// One in-connection file download (`UFileChannel`): the client opens a
+/// `CHTYPE_FILE` channel whose payload is the 16-byte package GUID; the
+/// server streams the raw file bytes across reliable bunches until close.
+#[derive(Debug)]
+struct FileActive {
+    ch: u32,
+    fname: String,
+    guid: String,
+    size: u64,
+    data: Vec<u8>,
+    started: Instant,
+    /// Last time new bytes arrived (stall detection).
+    last_data: Instant,
 }
 
 fn rbits(data: &[u8]) -> Bunch {
@@ -172,6 +215,13 @@ impl LiveClient {
             travel_url: None,
             defaults: None,
             download: None,
+            channel_dl_offered: false,
+            file_queue: Vec::new(),
+            file_active: None,
+            file_next_ch: 1000,
+            welcome_pending: None,
+            http_state: None,
+            http_handle: None,
         };
         let hello = format!("HELLO REVISION=0 MINVER=3180 VER=3339 STEAMID={}", c.auth.steam_id);
         c.send_control(&hello, true);
@@ -309,6 +359,8 @@ impl LiveClient {
                 }
             }
         }
+        self.check_file_timeout();
+        self.poll_http_downloads();
         self.flush();
         events
     }
@@ -441,35 +493,102 @@ impl LiveClient {
         }
     }
 
-    /// Downloads every `USES` package missing locally from the server's FastDL redirect
-    /// (like the retail `UPendingLevel` before joining). Files go to `download_dir`, never
-    /// into the game installation. Packages that cannot be fetched stay unresolved.
-    fn fetch_missing_packages(&mut self) {
-        let missing: Vec<(String, String)> = self
+    /// Starts background FastDL downloads for every `USES` package missing
+    /// locally (like the retail `UPendingLevel` before joining). The network
+    /// thread keeps polling (acks + keepalives) while the files stream in;
+    /// [`poll`](Self::poll) joins the results and moves on to channel
+    /// downloads / `JOIN`. Files go to `download_dir`, never into the game.
+    fn spawn_http_downloads(&mut self, missing: Vec<(String, String)>) {
+        let Some((base, compressed)) = self.download.as_ref().and_then(|d| d.redirect_url.clone().map(|u| (u, d.compressed))) else {
+            return;
+        };
+        let dir = crate::download::download_dir(&self.kf_dir);
+        let state = std::sync::Arc::new(std::sync::Mutex::new(HttpProgress { current: None, queued: missing.len(), done: false }));
+        let st = state.clone();
+        let handle = std::thread::Builder::new()
+            .name("openkf-fastdl".into())
+            .spawn(move || {
+                let mut out = Vec::new();
+                let total = missing.len();
+                for (i, (fname, guid)) in missing.into_iter().enumerate() {
+                    {
+                        let mut s = st.lock().unwrap();
+                        s.current = Some((fname.clone(), 0, None));
+                        s.queued = total - i - 1;
+                    }
+                    let t = std::time::Instant::now();
+                    let fname2 = fname.clone();
+                    let st2 = st.clone();
+                    let r = crate::download::fetch_package_with_progress(&base, compressed, &fname, Some(&guid), &dir, &mut move |rx, tot| {
+                        if let Ok(mut s) = st2.lock() {
+                            s.current = Some((fname2.clone(), rx, tot));
+                        }
+                    });
+                    match &r {
+                        Ok(p) => {
+                            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                            println!("[Download] {fname} {} KB in {:.1} s", size / 1024, t.elapsed().as_secs_f32());
+                        }
+                        Err(e) => println!("[Download] {fname} failed: {e}"),
+                    }
+                    out.push((fname, guid, r));
+                }
+                if let Ok(mut s) = st.lock() {
+                    s.current = None;
+                    s.queued = 0;
+                    s.done = true;
+                }
+                out
+            });
+        match handle {
+            Ok(h) => {
+                self.http_state = Some(state);
+                self.http_handle = Some(h);
+            }
+            Err(e) => self.log.push(format!("download: cannot spawn FastDL thread: {e}")),
+        }
+    }
+
+    /// Joins finished background FastDL downloads and continues the handshake
+    /// (channel downloads for leftovers, then `JOIN`). Called from [`poll`](Self::poll).
+    fn poll_http_downloads(&mut self) {
+        let finished = self.http_handle.as_ref().is_some_and(|h| h.is_finished());
+        if !finished {
+            return;
+        }
+        let results = match self.http_handle.take() {
+            Some(h) => h.join().unwrap_or_default(),
+            None => Vec::new(),
+        };
+        self.http_state = None;
+        for (fname, guid, r) in &results {
+            match r {
+                Ok(p) => self.log.push(format!("fastdl: {fname} -> {}", p.display())),
+                Err(e) => self.log.push(format!("fastdl: {fname} ({guid}) failed: {e}")),
+            }
+        }
+        // Leftovers go through the in-connection file channel, if offered.
+        let missing: Vec<UsesLine> = self
             .uses
             .iter()
             .filter(|u| !u.fname.is_empty())
             .filter(|u| crate::download::find_package_by_guid(&self.kf_dir, &u.fname, &u.guid).is_none())
-            .map(|u| (u.fname.clone(), u.guid.clone()))
+            .cloned()
             .collect();
-        if missing.is_empty() {
+        if !missing.is_empty() && self.channel_dl_offered {
+            self.log.push(format!("channel-dl: {} package(s) queued for in-connection download", missing.len()));
+            println!("[Download] {} package(s) via in-connection channel", missing.len());
+            self.file_queue = missing.into_iter().rev().collect();
+            self.start_next_file_download();
+            self.flush();
             return;
         }
-        let Some((base, compressed)) = self.download.as_ref().and_then(|d| d.redirect_url.clone().map(|u| (u, d.compressed))) else {
-            self.log.push(format!("download: {} package(s) missing and no HTTP redirect offered: {:?}", missing.len(), missing.iter().map(|m| &m.0).collect::<Vec<_>>()));
-            return;
-        };
-        let dir = crate::download::download_dir(&self.kf_dir);
-        for (fname, guid) in missing {
-            let t = std::time::Instant::now();
-            match crate::download::fetch_package(&base, compressed, &fname, Some(&guid), &dir) {
-                Ok(p) => {
-                    let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                    // Printed immediately: downloads block the network thread.
-                    println!("[Download] {fname} {} KB in {:.1} s", size / 1024, t.elapsed().as_secs_f32());
-                }
-                Err(e) => println!("[Download] {fname} failed: {e}"),
-            }
+        if !missing.is_empty() {
+            self.log.push(format!("download: {} package(s) unavailable: {:?}", missing.len(), missing.iter().map(|m| &m.fname).collect::<Vec<_>>()));
+        }
+        if let Some(w) = self.welcome_pending.take() {
+            self.finish_welcome(&w);
+            self.flush();
         }
     }
 
@@ -482,13 +601,10 @@ impl LiveClient {
             }
             return;
         }
-        // File/Voice isolation: File -> DownloadManager, Voice -> drop
+        // File/Voice isolation: File -> channel download, Voice -> drop.
         if let Some(t) = b.ch_type {
             if t == CHTYPE_FILE {
-                if let Some(dm) = self.download.as_mut() {
-                    let name = format!("ch{}.bin", b.ch_index);
-                    dm.push_chunk(&name, &b.data);
-                }
+                self.on_file_bunch(&b);
                 return;
             }
             if t == CHTYPE_VOICE {
@@ -630,29 +746,41 @@ impl LiveClient {
                 }
             }
             "WELCOME" => {
-                self.map = param(m, "LEVEL").map(str::to_string);
                 self.state = LiveState::LoggedIn;
-                self.fetch_missing_packages();
-                let schema = GameSchema::load(&self.kf_dir, std::mem::take(&mut self.uses));
-                self.log.push(format!("schema: {} objects, {} names", schema.map.max_object_index, schema.names.len()));
-                let mut session = ActorSession::new(schema);
-                session.defaults = self.defaults.clone();
-                self.session = Some(session);
-                let entries = self.pete_entries();
-                let mut st = self.rand();
-                for msg in pete_messages(&entries, self.gz, || {
-                    st ^= st << 13;
-                    st ^= st >> 17;
-                    st ^= st << 5;
-                    50 - (st % 20) as usize
-                }) {
-                    self.send_control(&msg, false);
+                let missing: Vec<UsesLine> = self
+                    .uses
+                    .iter()
+                    .filter(|u| !u.fname.is_empty())
+                    .filter(|u| crate::download::find_package_by_guid(&self.kf_dir, &u.fname, &u.guid).is_none())
+                    .cloned()
+                    .collect();
+                // FastDL first, in a background thread (the connection stays alive);
+                // leftovers fall through to the in-connection file channel below.
+                let has_http = self.download.as_ref().and_then(|d| d.redirect_url.clone()).is_some();
+                if !missing.is_empty() && has_http {
+                    self.log.push(format!("fastdl: {} package(s) in background", missing.len()));
+                    println!("[Download] {} package(s) via FastDL (background)", missing.len());
+                    self.welcome_pending = Some(m.to_string());
+                    let jobs = missing.iter().map(|u| (u.fname.clone(), u.guid.clone())).collect();
+                    self.spawn_http_downloads(jobs);
+                    self.flush();
+                    return;
                 }
-                self.send_control("JOIN", false);
-                // Required for movement ack on strict servers (see network_protocol.md:164)
-                self.send_control("OPENVOICE 1", false);
-                self.send_control("SA N=0", false);
-                self.state = LiveState::Joined;
+                // No HTTP redirect: packages still missing go through the
+                // in-connection file channel (retail `Engine.ChannelDownload`).
+                if !missing.is_empty() && self.channel_dl_offered {
+                    self.log.push(format!("channel-dl: {} package(s) queued for in-connection download", missing.len()));
+                    println!("[Download] {} package(s) via in-connection channel", missing.len());
+                    self.file_queue = missing.into_iter().rev().collect();
+                    self.welcome_pending = Some(m.to_string());
+                    self.start_next_file_download();
+                    self.flush();
+                    return;
+                }
+                if !missing.is_empty() {
+                    self.log.push(format!("download: {} package(s) unavailable (no HTTP redirect, no ChannelDownload)", missing.len()));
+                }
+                self.finish_welcome(m);
             }
             "DLMGR" => {
                 // Download managers offered by the server, in preference order:
@@ -667,6 +795,9 @@ impl LiveClient {
                             self.log.push(format!("dlmgr: HTTP redirect {url} (uz2 {})", dm.compressed));
                         }
                     }
+                } else if class.eq_ignore_ascii_case("Engine.ChannelDownload") {
+                    self.channel_dl_offered = true;
+                    self.log.push("dlmgr: Engine.ChannelDownload offered".into());
                 } else {
                     self.log.push(format!("dlmgr: {class} offered"));
                 }
@@ -694,6 +825,173 @@ impl LiveClient {
             "FAILURE" | "FAILCODE" | "UPGRADE" => self.state = LiveState::Failed,
             _ => {}
         }
+    }
+
+    /// Completes the `WELCOME` handshake: announces the map, builds the
+    /// replication schema and sends `PETE` + `JOIN`. Runs immediately unless
+    /// channel downloads are pending, in which case it runs after the last one.
+    fn finish_welcome(&mut self, m: &str) {
+        self.map = param(m, "LEVEL").map(str::to_string);
+        let schema = GameSchema::load(&self.kf_dir, std::mem::take(&mut self.uses));
+        self.log.push(format!("schema: {} objects, {} names", schema.map.max_object_index, schema.names.len()));
+        let mut session = ActorSession::new(schema);
+        session.defaults = self.defaults.clone();
+        self.session = Some(session);
+        let entries = self.pete_entries();
+        let mut st = self.rand();
+        for msg in pete_messages(&entries, self.gz, || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            50 - (st % 20) as usize
+        }) {
+            self.send_control(&msg, false);
+        }
+        self.send_control("JOIN", false);
+        // Required for movement ack on strict servers (see network_protocol.md:164)
+        self.send_control("OPENVOICE 1", false);
+        self.send_control("SA N=0", false);
+        self.state = LiveState::Joined;
+    }
+
+    /// Starts the next queued in-connection download, or finishes `WELCOME`
+    /// when the queue is empty. One file at a time, like the retail client.
+    fn start_next_file_download(&mut self) {
+        if self.file_active.is_some() {
+            return;
+        }
+        let Some(next) = self.file_queue.pop() else {
+            if let Some(w) = self.welcome_pending.take() {
+                self.log.push("channel-dl: queue complete".into());
+                self.finish_welcome(&w);
+                self.flush();
+            }
+            return;
+        };
+        let Some(guid) = crate::download::guid_to_bytes(&next.guid) else {
+            self.log.push(format!("channel-dl: bad GUID for {}", next.fname));
+            self.start_next_file_download();
+            return;
+        };
+        let ch = self.file_next_ch;
+        self.file_next_ch += 1;
+        if self.file_next_ch >= MAX_CHANNELS {
+            self.file_next_ch = 1000;
+        }
+        let seq = self.out_seq.entry(ch).or_insert(0);
+        *seq = (*seq + 1) % MAX_CH_SEQUENCE;
+        self.queued.push(Bunch {
+            control: true,
+            open: true,
+            close: false,
+            reliable: true,
+            ch_index: ch,
+            ch_sequence: Some(*seq),
+            ch_type: Some(CHTYPE_FILE),
+            data_bits: 128,
+            data: guid.to_vec(),
+        });
+        self.log.push(format!("channel-dl: requesting {} ({}) on ch{ch}", next.fname, next.guid));
+        println!("[Download] requesting {} via channel ch{ch}", next.fname);
+        let now = Instant::now();
+        self.file_active = Some(FileActive { ch, fname: next.fname, guid: next.guid, size: next.size, data: Vec::new(), started: now, last_data: now });
+    }
+
+    /// Accumulates one `CHTYPE_FILE` bunch into the active download.
+    fn on_file_bunch(&mut self, b: &Bunch) {
+        let Some(active) = self.file_active.as_mut() else { return };
+        if b.ch_index != active.ch {
+            return;
+        }
+        // File payloads are whole bytes; ignore any trailing partial byte.
+        let n = (b.data_bits / 8).min(b.data.len());
+        if active.data.len() + n > crate::download::MAX_DOWNLOAD {
+            self.log.push(format!("channel-dl: {} exceeds size cap, aborting", active.fname));
+            self.file_active = None;
+            self.start_next_file_download();
+            return;
+        }
+        active.data.extend_from_slice(&b.data[..n]);
+        if n > 0 {
+            active.last_data = Instant::now();
+        }
+        let done = b.close || (active.size > 0 && active.data.len() as u64 >= active.size);
+        if b.close || active.data.len() % (256 * 1024) < n {
+            println!("[Download] {} {} KB{}", active.fname, active.data.len() / 1024, if active.size > 0 { format!(" / {} KB", active.size / 1024) } else { String::new() });
+        }
+        if !done {
+            return;
+        }
+        let active = self.file_active.take().unwrap();
+        let dir = crate::download::download_dir(&self.kf_dir);
+        let tmp = dir.clone().join(format!("{}.part", active.fname));
+        let dst = dir.join(&active.fname);
+        let mut bytes = active.data;
+        // Same normalization as FastDL: tweaked package tags are stored fixed.
+        if bytes.len() >= 4 {
+            let tag = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+            if tag != crate::download::PACKAGE_TAG && tag & 0xFFFF_FF00 == crate::download::PACKAGE_TAG & 0xFFFF_FF00 {
+                bytes[0..4].copy_from_slice(&crate::download::PACKAGE_TAG.to_le_bytes());
+            }
+        }
+        let saved = std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(&tmp, &bytes))
+            .map_err(|e| e.to_string())
+            .and_then(|_| {
+                match crate::download::package_guid(&tmp) {
+                    Some(g) if g.eq_ignore_ascii_case(&active.guid) => std::fs::rename(&tmp, &dst).map_err(|e| e.to_string()),
+                    Some(g) => Err(format!("GUID mismatch: got {g}, want {}", active.guid)),
+                    None => Err("not an Unreal package".into()),
+                }
+            });
+        match saved {
+            Ok(()) => {
+                self.log.push(format!("channel-dl: {} saved ({} KB)", active.fname, bytes.len() / 1024));
+                println!("[Download] {} saved ({} KB)", active.fname, bytes.len() / 1024);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                self.log.push(format!("channel-dl: {} failed: {e}", active.fname));
+                println!("[Download] {} failed: {e}", active.fname);
+            }
+        }
+        self.start_next_file_download();
+        self.flush();
+    }
+
+    /// Aborts a stalled channel download (30 s without new bytes) and moves on.
+    /// Slow-but-moving transfers (the server throttles file data to ~14 KB/s
+    /// at `NETSPEED 25000`) are allowed to run as long as bytes keep arriving.
+    fn check_file_timeout(&mut self) {
+        let stalled = self.file_active.as_ref().is_some_and(|a| a.last_data.elapsed() > Duration::from_secs(30));
+        if stalled {
+            if let Some(a) = self.file_active.take() {
+                self.log.push(format!("channel-dl: {} stalled after {} KB in {:.0} s", a.fname, a.data.len() / 1024, a.started.elapsed().as_secs_f32()));
+                println!("[Download] {} stalled, aborting", a.fname);
+            }
+            self.start_next_file_download();
+        }
+    }
+
+    /// Current channel-download progress for the HUD: (file, received, total, queued).
+    pub fn file_progress(&self) -> Option<(String, u64, u64, usize)> {
+        self.file_active.as_ref().map(|a| (a.fname.clone(), a.data.len() as u64, a.size, self.file_queue.len()))
+    }
+
+    /// Unified download progress (background FastDL or channel) for the HUD:
+    /// (source "HTTP"/"CHAN", file, received bytes, total or 0, queued files).
+    pub fn download_progress(&self) -> Option<(String, String, u64, u64, usize)> {
+        if let Some((f, rx, tot, q)) = self.file_progress() {
+            return Some(("CHAN".into(), f, rx, tot, q));
+        }
+        let st = self.http_state.as_ref()?.lock().ok()?;
+        let (f, rx, tot) = st.current.clone()?;
+        Some(("HTTP".into(), f, rx, tot.unwrap_or(0), st.queued))
+    }
+
+    /// True while downloads (FastDL background or channel) hold `WELCOME`.
+    pub fn downloading(&self) -> bool {
+        self.welcome_pending.is_some()
     }
 }
 

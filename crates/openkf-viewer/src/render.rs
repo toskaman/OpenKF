@@ -651,4 +651,9 @@ impl Renderer {
     pub fn draw_calls(&self) -> usize {
         self.batches.len() + self.terrains.iter().map(|t| t.3.len()).sum::<usize>() + self.actors.iter().chain(self.props.iter()).map(|a| a.1.len()).sum::<usize>()
     }
+
+    /// Depth buffer view for overlay passes (particles). `None` before first `render`.
+    pub fn depth_texture(&self) -> Option<&wgpu::TextureView> {
+        self.depth.as_ref().map(|d| &d.0)
+    }
 }

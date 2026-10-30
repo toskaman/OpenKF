@@ -1,40 +1,44 @@
-# OpenKF — work log and next steps (2026-10-30)
+# Handoff (2026-10-30, evening — v1.7.0 done)
 
 ## Done this session
-- Pickups / static-mesh projectiles rendered live (`openkf-viewer/src/props.rs`, pool from class defaults: 95 meshes / 303 slots).
-- Pawn animation: direction-aware MovementAnims / Walk / Crouch, idle anims, replicated `AnimAction` one-shots, death handling (death anim or fall-over, 6 s corpses); attachments follow owner's one-shot pose.
-- English HUD; automated test player disabled on public servers (spectator unless `--play`).
-- FastDL implemented for real: `DLMGR` HTTP redirect parsing, missing `USES` packages downloaded before the level loads, `.uz2` decompression (flate2), GUID check, tweaked package tag (0x9E2A83C2) normalized, stored in `%LOCALAPPDATA%\OpenKF\Downloads`, searched by schema + asset loader + map resolution. Verified: KF-Space-Airlock[WSB].rom (1386 KB) fetched from a live redirect in 5 s.
-- `examples/fastdl.rs` probe tool; map-load failure exits cleanly; WELCOME wait raised to 180 s.
-- Tests: whole workspace green (39 test binaries), 3 new FastDL tests, 2 props tests.
-- Live check on local server: 0 decode failures, locomotion anims resolved.
-- Public modded server: handshake + Steam auth + WELCOME OK on first try; later attempts got no reply after LOGIN (server-side, unresolved).
 
-## Next steps
-1. Retry the public server (`--connect <ip:port>`) now that FastDL works; confirm all custom packages download and the map renders.
-2. Particle emitters / decals; Karma ragdolls.
-3. Server browser in the viewer (code in `openkf-app::steam_matchmaking`).
-4. Benchmarks retail vs OpenKF: RAM, CPU %, cores/threads used, map load time, FPS solo and multiplayer (same map, same camera path, same resolution), publish method + raw data in README.
+- **ChannelDownload** (`Engine.ChannelDownload`, `CHTYPE_FILE=3`): GUID-keyed
+  file channels, verified against a retail server (4 KB / 15 KB / 1.2 MB,
+  GUID-checked). Stall-based timeout (30 s without bytes); the server throttles
+  to ~14 KB/s at `NETSPEED 25000`. High channel range (1000+) avoids actor
+  collisions. Maps missing from the HTTP redirect now load.
+- **Sound hardening**: 256-byte RIFF search, nested SoundGroup flattening,
+  typed failures, no failure caching. 17,916 retail/cached sounds parse; live
+  90 sounds with 0 failures.
+- **Background downloads + progress bar**: FastDL on a worker thread
+  (header-first streaming with progress callbacks), channel downloads already
+  async; unified `DL HTTP/CHAN file pct bar LEFT` in HUD + console.
+- **Particles/decals**: 2048 pool, billboard Vulkan pass, blood/muzzle/smoke/
+  sticky decals; 77 live in the combat screenshot.
+- **Ragdolls**: single-body Karma translation + tip-over physics for corpses
+  without death anims; legacy timed fall-over kept as fallback.
+- **Server browser**: `--browse` (favorites/recents/direct, `fav`/`unfav`),
+  recents auto-saved on join. Matchmaking code moved to
+  `openkf-network::browser`. No internet list (UDP masters dead, no usable
+  query protocol) — Steamworks is the documented path.
+- **Benchmarks**: `--bench N` orbit, `scripts/bench.ps1`, `docs/BENCHMARKS.md`
+  with real numbers (solo 670 FPS, live 103 FPS @155 actors, retail 3.29 s).
+- Release build: zero warnings. Full workspace suite: green.
 
-## Update (end of session)
-- `steam_appid.txt` found in `KillingFloor\System` and renamed to `steam_appid.txt.openkf-bak` (not the cause).
-- Retail client joins the public test server fine; OpenKF gets STEAMENCRYPTIONKEY + CHALLENGE, sends AUTH/LOGIN, then the server stays silent (no WELCOME). Name is not the cause.
-- Added `TerminateGameConnection` before `InitiateGameConnection` and on client drop (retail behaviour); live verification pending.
-- Next: record a retail join with `openkf-netcap` (relay) and diff the AUTH / LOGIN / Steam blob messages against OpenKF's (the STEAMTICKET chunks with SIZE=1 are a suspect).
+## Suggested next steps
 
-## Retail capture diff (public modded server)
-- Retail join captured through `openkf-netcap` (captures stay local, never committed).
-- Control messages now match retail: `AUTH ... USERNAME= PASSWORD=`, `NETSPEED 25000`, `?VAC=1` in the LOGIN URL. Challenge response and GMD5 verified identical to retail.
-- Server still silent after LOGIN for OpenKF only. Remaining differences are below the control layer (packet acks / timing; retail sends the Steam blob ~1.7 s after STEAMENCRYPTIONKEY) or Steam-side session state.
-- Next: capture OpenKF through the same relay and diff packet by packet against the retail capture.
+1. Public modded server re-test (FastDL bulk + channel for redirect misses);
+   confirm the old ~25% sound failures are gone with all packages present.
+2. Steamworks `ISteamMatchmakingServers` for a real internet server list.
+3. Faster channel downloads: raise `NETSPEED` during downloads, then restore.
+4. RAM: stream/share decoded textures instead of keeping everything resident.
+5. Retail FPS automation (PresentMon) for a complete FPS comparison.
+6. Articulated ragdolls (multi-body), projected decals, 3D browser UI.
 
-## Root cause found: the server was never silent
-- A capture of OpenKF through `openkf-netcap` showed the server sends DLMGR + WELCOME right after LOGIN. OpenKF was busy downloading the server's ~1-2 GB of custom packages (FastDL) inside the WELCOME handler, so the viewer's 180 s join timeout fired first.
-- Fixes: retail download cache (`<KF>/Cache/Cache.ini`, `<GUID>.uxx`) is searched before downloading; download progress printed live; join wait raised to 900 s. Downloads persist in `%LOCALAPPDATA%\OpenKF\Downloads`, so later joins are fast.
-- TODO: download in a background thread while keeping the connection alive (retail behaviour), and show progress in the HUD.
+## Notes
 
-## Retail cache + first public join (done)
-- First successful join of the public modded server (wave 5, 44 zeds rendered, spectator).
-- Retail cache format fixed: `Cache.ini` keys are `<GUID>-<GEN>`, files `<GUID>-<GEN>.uxx`; lookup is now by exact USES GUID (`find_package_by_guid`), so packages the retail client already downloaded are reused.
-- Open: maps that are not on the HTTP redirect (e.g. KF-BOX -> 404) need UE2 ChannelDownload (CHTYPE_FILE). Needs a retail capture of a channel download to implement exactly.
-- Open: ~25% custom sounds fail to play; downloads should run in the background with a HUD progress bar.
+- `scripts/bench.ps1` uses `KF_DIR` or the default Steam path; 20 s cooldowns
+  between runs (thermals move FPS up to 2x).
+- Retail load marker: `Bringing Level <Map>.myLevel up for play ... appSeconds:`.
+- Old UDP masters (`hl2master.steampowered.com`, GameSpy) are NXDOMAIN/dead;
+  KF1 dedicated servers answer neither A2S nor GameSpy usefully.

@@ -289,6 +289,7 @@ impl SkelActor {
     pub fn apply_pawn_anim(&mut self, p: &crate::live_view::PawnView) -> bool {
         self.anim_time = None;
         self.roll = 0;
+        self.pitch = 0;
         if let Some(t) = p.dying {
             let death = p
                 .death_anims
@@ -300,13 +301,21 @@ impl SkelActor {
                 });
             match death {
                 Some(i) => {
-                    // Play once, then hold the last frame.
+                    // Play once, then hold the last frame (upright, in place).
                     self.seq = i;
                     self.anim_time = Some(t.min((self.seq_duration(i) - 0.01).max(0.0)));
                 }
+                None if p.ragdoll => {
+                    // Karma ragdoll drives location + orientation (set by the caller
+                    // from the live physics state); freeze the idle pose on the body.
+                    self.seq = self.idle_seq;
+                    self.anim_time = Some(0.0);
+                    self.pitch = p.pitch;
+                    self.roll = p.roll;
+                }
                 None => {
-                    // No death sequence (retail KF uses Karma ragdolls): tip the body over
-                    // onto the floor in 0.45 s, frozen in its idle pose.
+                    // Legacy fallback (no physics state): tip the body over onto the
+                    // floor in 0.45 s, frozen in its idle pose.
                     let k = (t / 0.45).min(1.0);
                     let k = k * k;
                     self.seq = self.idle_seq;

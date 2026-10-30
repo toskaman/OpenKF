@@ -2,6 +2,49 @@
 
 All notable changes to OpenKF. Dates are 2026.
 
+## v1.7.0 — Downloads, effects, browser, benchmarks (October 30)
+
+### Added
+- **In-connection downloads (`Engine.ChannelDownload`)**: packages missing from
+  the HTTP redirect (e.g. custom maps) are fetched over `CHTYPE_FILE` channels
+  (GUID request, throttled stream, GUID-verified save), one file at a time with
+  stall-based timeout. Verified against a retail dedicated server up to 1.2 MB.
+- **Background FastDL**: HTTP downloads run on a worker thread while the
+  connection stays alive (acks + keepalives); unified progress bar
+  (`DL HTTP/CHAN file pct bar LEFT`) in the HUD and console.
+- **Particles and decals**: CPU pool (2048) with billboard Vulkan pass —
+  blood bursts, muzzle flashes, emitter smoke, sticky blood/impact decals.
+- **Karma ragdolls**: corpses without a death animation collapse with rigid-body
+  translation (gravity, ground bounce, friction) plus tip-over torque and yaw
+  spin; the timed fall-over remains as a legacy fallback.
+- **Server browser** (`--browse`): favorites + auto-saved recents + direct IP
+  entry in the viewer (`fav`/`unfav` commands). The old UDP masters are gone
+  and KF1 answers no usable query protocol, so there is no internet list yet —
+  Steamworks `ISteamMatchmakingServers` is the documented next step. The
+  matchmaking code moved from `openkf-app` to `openkf-network::browser`.
+- **Benchmarks**: headless `--bench N` orbit (skinning + render timed),
+  `scripts/bench.ps1` (OpenKF solo/live + retail load/RAM/CPU/threads),
+  `docs/BENCHMARKS.md` with method, hardware, table, and raw data.
+- **Sound hardening**: 256-byte RIFF search, nested `SoundGroup` flattening,
+  typed play-failure reasons (`NoData`/`NoRiff`/`BadWav`/`Engine`), failures
+  are no longer cached (a late download becomes playable).
+- `--bench` works without `--screenshot`; `[SceneLoad]` timing marker.
+
+### Changed
+- `WELCOME` no longer blocks on downloads: FastDL (background) then channel
+  downloads run before `JOIN` while the map announcement waits.
+- Death path: authored death animations play upright in place; physics drives
+  only the no-anim fallback (plus a small position settle).
+- `http_get` streams the body with progress callbacks (header-first read).
+
+### Verified
+- Channel download of 4 KB / 15 KB / 1.2 MB from a retail server (GUID-checked).
+- Full workspace suite green; release build with zero warnings.
+- Live dedicated server, KF-WestLondon, 30 s: 154 actors, 10 pawns, 3 kills,
+  90 sounds with 0 failures, 77 particles, decode failures 0.
+- Benchmarks (RTX 4060 Ti): solo 670 FPS / 0.29 s load; live 103 FPS at
+  155 actors; retail 3.29 s load / 682 MB / 6% CPU.
+
 ## v1.6.0 — Client rework: live world & animation (October 30)
 
 ### Added

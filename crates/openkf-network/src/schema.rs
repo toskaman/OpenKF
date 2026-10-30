@@ -351,21 +351,37 @@ impl GameSchema {
 impl GameSchema {
     /// Members of a `SoundGroup` export (UE2 KF: tagged props "None", then
     /// compact count + compact object refs), as global network indices.
+    /// Nested groups are flattened one level deep.
     pub fn sound_group_members(&self, index: u32) -> Vec<u32> {
+        self.sound_group_members_depth(index, 0)
+    }
+
+    fn sound_group_members_depth(&self, index: u32, depth: u32) -> Vec<u32> {
         let Some((slot, e)) = self.locate(index) else { return Vec::new() };
         let Some(m) = self.pkgs[slot].as_ref() else { return Vec::new() };
         let p = m.as_package();
+        // Only `SoundGroup` exports have the count + refs layout; anything else
+        // (already a `Sound`, unknown class) yields no members.
+        if openkf_package::export_class_name(&p, e) != "SoundGroup" {
+            return Vec::new();
+        }
         let Ok(d) = p.get_export_data(e) else { return Vec::new() };
         let mut o = 0usize;
         let mut out = Vec::new();
-        let (Ok(_none), Ok(n)) = (openkf_package::read_compact_index(d, &mut o), openkf_package::read_compact_index(d, &mut { o })) else { return out };
-        let _ = n;
+        let Ok(_none) = openkf_package::read_compact_index(d, &mut o) else { return out };
         let Ok(count) = openkf_package::read_compact_index(d, &mut o) else { return out };
         for _ in 0..count.clamp(0, 64) {
             let Ok(r) = openkf_package::read_compact_index(d, &mut o) else { break };
-            if let Some((s2, e2)) = self.resolve_ref(slot, r) {
-                out.push(self.map.packages[s2].object_base + e2 as u32);
+            let Some((s2, e2)) = self.resolve_ref(slot, r) else { continue };
+            let idx = self.map.packages[s2].object_base + e2 as u32;
+            if depth == 0 {
+                let nested = self.pkgs[s2].as_ref().is_some_and(|m2| openkf_package::export_class_name(&m2.as_package(), e2) == "SoundGroup");
+                if nested {
+                    out.extend(self.sound_group_members_depth(idx, 1));
+                    continue;
+                }
             }
+            out.push(idx);
         }
         out
     }

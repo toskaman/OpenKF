@@ -1606,6 +1606,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
+ "flate2",
  "glam",
  "md-5",
  "openkf-package",
@@ -1652,6 +1653,7 @@ dependencies = [
  "openkf-audio",
  "openkf-network",
  "openkf-package",
+ "openkf-physics",
  "openkf-render",
  "png",
  "pollster",
