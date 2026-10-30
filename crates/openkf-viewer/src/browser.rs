@@ -90,82 +90,85 @@ pub fn valid_addr(s: &str) -> bool {
 }
 
 /// Interactive pick: numbered favorites + recents, or a typed `ip:port`.
-/// Returns the chosen address, or `None` on empty input / EOF.
+/// `fav`/`unfav` edit the list and re-prompt; empty input / EOF quits.
 pub fn pick() -> Option<String> {
     use std::io::{BufRead, Write};
-    let favs = favorites();
-    let rec = recent();
-    println!("=== OpenKF servers ===");
-    let mut n = 0usize;
-    let mut addrs: Vec<String> = Vec::new();
-    if !favs.is_empty() {
-        println!("-- favorites --");
-        for e in &favs {
-            n += 1;
-            println!("{n:3}  {:24}  {}", e.addr, e.name);
-            addrs.push(e.addr.clone());
+    loop {
+        let favs = favorites();
+        let rec = recent();
+        println!("=== OpenKF servers ===");
+        let mut n = 0usize;
+        let mut addrs: Vec<String> = Vec::new();
+        if !favs.is_empty() {
+            println!("-- favorites --");
+            for e in &favs {
+                n += 1;
+                println!("{n:3}  {:24}  {}", e.addr, e.name);
+                addrs.push(e.addr.clone());
+            }
         }
-    }
-    if !rec.is_empty() {
-        println!("-- recent --");
-        for e in rec.iter().filter(|e| !favs.iter().any(|f| f.addr == e.addr)) {
-            n += 1;
-            println!("{n:3}  {}", e.addr);
-            addrs.push(e.addr.clone());
+        if !rec.is_empty() {
+            println!("-- recent --");
+            for e in rec.iter().filter(|e| !favs.iter().any(|f| f.addr == e.addr)) {
+                n += 1;
+                println!("{n:3}  {}", e.addr);
+                addrs.push(e.addr.clone());
+            }
         }
-    }
-    if n == 0 {
-        println!("(no saved servers yet)");
-    }
-    println!("Enter a number, an ip:port, 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip>' to remove.");
-    print!("> ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).ok()?;
-    let line = line.trim().to_string();
-    if line.is_empty() {
-        return None;
-    }
-    if let Some(rest) = line.strip_prefix("unfav ").or_else(|| line.strip_prefix("UNFAV ")) {
-        let what = rest.trim();
-        let addr = match what.parse::<usize>() {
-            Ok(i) if i >= 1 && i <= addrs.len() => addrs[i - 1].clone(),
-            _ => what.to_string(),
-        };
-        if remove_favorite(&addr) {
-            println!("removed favorite {addr}");
-        } else {
-            println!("not a favorite: {addr}");
+        if n == 0 {
+            println!("(no saved servers yet)");
         }
-        return None;
-    }
-    if let Some(rest) = line.strip_prefix("fav ").or_else(|| line.strip_prefix("FAV ")) {
-        let rest = rest.trim();
-        let (what, name) = rest.split_once(' ').unwrap_or((rest, rest));
-        let addr = match what.parse::<usize>() {
-            Ok(i) if i >= 1 && i <= addrs.len() => addrs[i - 1].clone(),
-            _ => what.to_string(),
-        };
-        if !valid_addr(&addr) {
-            println!("bad address: {addr}");
+        println!("Enter a number, an ip:port, 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip-or-name>' to remove, or empty to quit.");
+        print!("> ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).ok().is_none_or(|n| n == 0) {
             return None;
         }
-        add_favorite(name, &addr);
-        println!("saved favorite '{name}' -> {addr}");
-        return Some(addr);
-    }
-    if let Ok(i) = line.parse::<usize>() {
-        if i >= 1 && i <= addrs.len() {
-            return Some(addrs[i - 1].clone());
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            return None;
         }
-        println!("no such entry: {i}");
-        return None;
+        if let Some(rest) = line.strip_prefix("unfav ").or_else(|| line.strip_prefix("UNFAV ")) {
+            let what = rest.trim();
+            let addr = match what.parse::<usize>() {
+                Ok(i) if i >= 1 && i <= addrs.len() => addrs[i - 1].clone(),
+                _ => favs.iter().find(|e| e.name == what).map(|e| e.addr.clone()).unwrap_or_else(|| what.to_string()),
+            };
+            if remove_favorite(&addr) {
+                println!("removed favorite {addr}");
+            } else {
+                println!("not a favorite: {addr}");
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("fav ").or_else(|| line.strip_prefix("FAV ")) {
+            let rest = rest.trim();
+            let (what, name) = rest.split_once(' ').unwrap_or((rest, rest));
+            let addr = match what.parse::<usize>() {
+                Ok(i) if i >= 1 && i <= addrs.len() => addrs[i - 1].clone(),
+                _ => what.to_string(),
+            };
+            if !valid_addr(&addr) {
+                println!("bad address: {addr}");
+                continue;
+            }
+            add_favorite(name, &addr);
+            println!("saved favorite '{name}' -> {addr}");
+            return Some(addr);
+        }
+        if let Ok(i) = line.parse::<usize>() {
+            if i >= 1 && i <= addrs.len() {
+                return Some(addrs[i - 1].clone());
+            }
+            println!("no such entry: {i}");
+            continue;
+        }
+        if valid_addr(&line) {
+            return Some(line);
+        }
+        println!("enter a number or ip:port (got '{line}')");
     }
-    if valid_addr(&line) {
-        return Some(line);
-    }
-    println!("enter a number or ip:port (got '{line}')");
-    None
 }
 
 #[cfg(test)]

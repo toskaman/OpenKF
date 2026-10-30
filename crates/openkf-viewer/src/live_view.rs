@@ -932,7 +932,9 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                 }
             }
             died_at.retain(|ch, t| t.elapsed() < CORPSE_TIME || pawns.iter().any(|p| p.channel == *ch));
-            ragdolls.retain(|ch, _| died_at.contains_key(ch));
+            // Ragdolls live as long as the corpse is visible (live pawn or
+            // closed-channel corpse); otherwise the body would respawn every frame.
+            ragdolls.retain(|ch, _| died_at.contains_key(ch) || corpses.iter().any(|(p, _)| p.channel == *ch));
             last_pawns = pawns.clone();
             for (p, t) in &corpses {
                 if !pawns.iter().any(|q| q.channel == p.channel) {
@@ -942,9 +944,13 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
             // Karma ragdolls drive corpses whose class has no death animation.
             for p in pawns.iter_mut().filter(|p| p.dying.is_some() && p.death_anims.is_empty()) {
                 let seed = (p.channel as u64).wrapping_mul(1_000_003).wrapping_add(t0.elapsed().as_micros() as u64);
+                let will_log = !ragdolls.contains_key(&p.channel) && ragdolls.len() < 3;
                 let r = ragdolls
                     .entry(p.channel)
                     .or_insert_with(|| crate::ragdoll::RagdollState::spawn(p.loc, p.yaw, p.collision_height, seed));
+                if will_log {
+                    println!("[Ragdoll] ch{} spawned at {:?}", p.channel, p.loc.map(|x| x as i32));
+                }
                 let (loc, yaw, pitch, roll) = r.pose();
                 p.loc = loc;
                 p.yaw = yaw;
