@@ -2,6 +2,54 @@
 
 All notable changes to OpenKF. Dates are 2026.
 
+## v1.9.0 — Articulated ragdolls, decals, in-game browser, internet list (October 30)
+
+### Added
+- **Articulated ragdolls**: corpses are now multi-body (64 bones, joint
+  limits, spring-damper) — limbs flail on death then settle, instead of a
+  single rigid fall-over. Unit-tested (flail/settle, joint limits).
+- **Projected decals**: blood and impact decals align to the hit surface,
+  expire over time, and recycle under a budget (oldest first).
+- **In-viewport server browser (F2)**: the server list now renders inside
+  the 3D viewport (6 rows, up/down cursor, rescan, join) — no more
+  console-only `--browse`.
+- **Internet server list**: TLS client (`ureq` + native TLS) plus the Steam
+  Web API `IGameServersService/GetServerList` feed real public servers
+  into the browser (needs an `OPENKF_STEAM_API_KEY` key; the 403
+  invalid-key path is covered live).
+- **Perk auto-select fallback**: on custom `RGameType` servers where the
+  client would sit pawnless in limbo, it now sends `SelectVeterancy` +
+  `ServerRestartPlayer` after 10 s (retail gametypes unaffected).
+
+### Changed
+- HUD and console output are fully English (`DOSH`, `sounds (failed N)`);
+  the bitmap font has no `£` glyph, so dosh shows as `DOSH 300`.
+- Benchmarks re-run: solo 671 FPS / 0.14 s load / 713 MB; live 95-99 FPS
+  at ~155 actors in wave combat (see below); retail 3.32 s load / 597 MB.
+- Retail's 120 FPS is a **hard engine ceiling**, not a config default:
+  fullscreen-exclusive 1600x900 with `MaxClientFrameRate=400` still reads
+  117 cur / 120 avg `stat fps` (screenshot in `docs/screenshots/`).
+
+### Fixed
+- The benchmark script no longer hangs when a stale dedicated server
+  still holds port 7717 (leftovers are killed first).
+
+### Verified
+- 251 tests green across the shipped crates (viewer 19, network 54,
+  render 159, package 8, audio 8, physics 3); release build clean.
+- Live wave combat: bot moves, fires, kills (2 kills), 0 sound failures,
+  0 decode failures at 150-158 actors.
+- Fullscreen-exclusive retail proof shot: 120 avg FPS uncapped attempt.
+
+### Known limits
+- Live orbit FPS is down from v1.8.0's 201 to ~95-99 at similar actor
+  counts — the cost of per-frame articulated ragdolls, projected decals,
+  and heavier combat effects. Profiling the live frame time is the next
+  perf step; real play (narrower frustum than the orbit) stays above 60.
+- Custom-gametype spawn still unsolved on `ServerPerks`-style servers
+  (client stays pawnless even after the perk fallback); retail gametypes
+  spawn normally.
+
 ## v1.8.0 — Memory, browser details, benchmark automation (October 30)
 
 ### Added

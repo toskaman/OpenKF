@@ -69,6 +69,8 @@ Write-Host "[bench] cooling down 20 s..."
 Start-Sleep -Seconds 20
 Write-Host "[bench] starting local server..."
 $sys = Join-Path $KF "System"
+taskkill /IM UCC.exe /F 2>$null | Out-Null
+Start-Sleep -Seconds 2
 Start-Process -FilePath (Join-Path $sys "UCC.exe") -WorkingDirectory $sys -WindowStyle Minimized -ArgumentList "server $Map.rom?game=KFmod.KFGameType?VACSecured=false?MaxPlayers=6 -port=7717 ini=OpenKF_Capture.ini -log=OpenKF_Bench.log" | Out-Null
 Start-Sleep -Seconds 10
 try {

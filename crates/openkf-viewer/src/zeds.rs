@@ -31,6 +31,8 @@ pub struct SkelActor {
     pub view_shrink: Option<ViewShrink>,
     /// One-shot animation time (seconds) instead of the global looping clock.
     pub anim_time: Option<f32>,
+    /// Articulated ragdoll deltas (mesh bone order), post-multiplied in `vertices`.
+    pub ragdoll_pose: Option<Vec<[f32; 4]>>,
     /// Per material slot: (texture index, blend) and triangle indices into wedge vertices.
     pub slots: Vec<(Option<(usize, Blend)>, Vec<u32>)>,
 }
@@ -81,6 +83,7 @@ fn build_actor(
         attach_pose: None,
         view_shrink: None,
         anim_time: None,
+        ragdoll_pose: None,
         slots,
     })
 }
@@ -127,6 +130,7 @@ fn duplicate_actor(t: &SkelActor) -> SkelActor {
         attach_pose: t.attach_pose,
         view_shrink: t.view_shrink,
         anim_time: t.anim_time,
+        ragdoll_pose: None,
         slots: t.slots.clone(),
     }
 }
@@ -208,7 +212,7 @@ impl SkelActor {
             // Hidden pool slot: collapse far below the map, no skinning.
             return m.wedges.iter().map(|w| Vertex { pos: [0.0, -1.0e6, 0.0], nrm: [0.0, 1.0, 0.0], uv: w.uv, light: [0; 4], lm_uv: [0.0; 2] }).collect();
         }
-        let pts = self.rig.pose_points(self.seq, self.anim_time.unwrap_or(time));
+        let pts = self.rig.pose_points_with(self.seq, self.anim_time.unwrap_or(time), self.ragdoll_pose.as_deref());
         let own = self.xf();
         let world: Vec<[f32; 3]> = match &self.attach_pose {
             // Attached: own mesh space (origin/scale/rot origin, no location/yaw) -> parent bone -> parent world.

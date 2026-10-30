@@ -14,6 +14,7 @@
 
 mod assets;
 mod browser;
+mod browser_ui;
 mod camera;
 mod particles;
 mod ragdoll;
@@ -296,6 +297,7 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
             a.yaw = p.yaw;
             a.pitch = p.pitch;
             a.roll = p.roll;
+            a.ragdoll_pose = p.ragdoll_bones.clone();
             a.apply_pawn_anim(p);
             println!("[Live] pawn {} at {:?} speed {:.0} anim {} action {:?} dying {:?}", live_pool[p.mesh].1, p.loc.map(|x| x as i32), p.speed, a.rig.anim.as_ref().and_then(|x| x.sequences.get(a.seq)).map(|q| q.name.clone()).unwrap_or_default(), p.action, p.dying);
             for (k, v) in sum.iter_mut().enumerate() { *v += p.loc[k]; }
@@ -437,7 +439,7 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
         if !s.particles.is_empty() {
             if let Some(depth) = r.depth_texture() {
                 let pr = particles::ParticleRenderer::new(&device, fmt, 2048);
-                pr.draw(&device, &queue, &view, depth, &cam, w as f32 / h.max(1) as f32, &s.particles.parts);
+                pr.draw(&device, &queue, &view, depth, &cam, w as f32 / h.max(1) as f32, &s.particles.parts, &s.particles.decals);
                 println!("[Particles] {} live", s.particles.len());
             }
         }
@@ -510,6 +512,21 @@ struct App {
     frames: u32,
     title: String,
     title_extra: String,
+    browser_ui: Option<browser_ui::BrowserUi>,
+}
+
+/// Join another server: restart the client onto it (fresh connection + scene).
+fn rejoin(addr: &str, args: &Args) -> ! {
+    let exe = std::env::current_exe().expect("exe");
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--kf").arg(&args.kf).arg("--connect").arg(addr);
+    if args.play {
+        cmd.arg("--play");
+    }
+    cmd.arg("--size").arg(format!("{}x{}", args.size.0, args.size.1));
+    cmd.arg("--name").arg(&args.name);
+    cmd.spawn().expect("rejoin");
+    std::process::exit(0);
 }
 
 impl ApplicationHandler for App {
@@ -595,6 +612,27 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(k) = event.physical_key {
                     if event.state == ElementState::Pressed {
+                        if k == KeyCode::F2 {
+                            if self.browser_ui.is_some() {
+                                self.browser_ui = None;
+                            } else {
+                                self.browser_ui = Some(browser_ui::BrowserUi::open());
+                            }
+                        } else if let Some(ui) = self.browser_ui.as_mut() {
+                            match k {
+                                KeyCode::ArrowUp => ui.mov(-1),
+                                KeyCode::ArrowDown => ui.mov(1),
+                                KeyCode::KeyL => ui.lan_scan(),
+                                KeyCode::Enter | KeyCode::NumpadEnter => {
+                                    if let Some(addr) = ui.selected().map(str::to_string) {
+                                        browser::push_recent(&addr);
+                                        rejoin(&addr, &self.args);
+                                    }
+                                }
+                                KeyCode::Escape => self.browser_ui = None,
+                                _ => {}
+                            }
+                        }
                         match k {
                             KeyCode::KeyP => self.paused = !self.paused,
                             KeyCode::KeyR => self.replay_ms = self.replay.as_ref().map_or(0.0, |r| r.start_ms as f64),
@@ -656,7 +694,7 @@ impl ApplicationHandler for App {
                         cam.pos = Vec3::new(me[0], me[2] + 44.0, me[1]); // KFHumanPawn.EyeHeight
                     }
                 }
-                let speed = if self.args.play { 0.0 } else if self.keys.contains(&KeyCode::ShiftLeft) { 3000.0 } else { 900.0 } * dt;
+                let speed = if self.args.play || self.browser_ui.is_some() { 0.0 } else if self.keys.contains(&KeyCode::ShiftLeft) { 3000.0 } else { 900.0 } * dt;
                 let (f, r) = (cam.forward(), cam.right());
                 let k = |c: KeyCode| self.keys.contains(&c);
                 // Physical keys: KeyW is the key at the W position (Z on AZERTY).
@@ -768,6 +806,7 @@ impl ApplicationHandler for App {
                         a.yaw = p.yaw;
                         a.pitch = p.pitch;
                         a.roll = p.roll;
+                        a.ragdoll_pose = p.ragdoll_bones.clone();
                         a.apply_pawn_anim(p);
                         slot_of[pi] = idx;
                     }
@@ -813,12 +852,18 @@ impl ApplicationHandler for App {
                     if !parts.is_empty() {
                         if let Some(depth) = g.renderer.depth_texture() {
                             let aspect = g.config.width as f32 / g.config.height.max(1) as f32;
-                            g.particles.draw(&g.device, &g.queue, &view, depth, &cam, aspect, &parts.parts);
+                            g.particles.draw(&g.device, &g.queue, &view, depth, &cam, aspect, &parts.parts, &parts.decals);
                         }
                     }
                     let line = sh.lock().unwrap().hud.clone();
-                    let controls = if self.args.play { "WASD MOVE  CLICK FIRE  R RELOAD  1-5 WEAPONS  G GRENADE  B BUY CLIP" } else { "SPECTATOR" };
-                    g.hud.draw(&g.device, &g.queue, &view, g.config.width, g.config.height, &[line, controls.to_string()], self.args.play);
+                    let controls = if self.args.play { "WASD MOVE  CLICK FIRE  R RELOAD  1-5 WEAPONS  G GRENADE  B BUY CLIP  F2 SERVERS" } else { "SPECTATOR  F2 SERVERS" };
+                    if self.browser_ui.is_none() {
+                        g.hud.draw(&g.device, &g.queue, &view, g.config.width, g.config.height, &[line, controls.to_string()], self.args.play);
+                    }
+                }
+                if let Some(ui) = self.browser_ui.as_mut() {
+                    ui.pump();
+                    g.hud.draw(&g.device, &g.queue, &view, g.config.width, g.config.height, &ui.lines(), false);
                 }
                 frame.present();
 
@@ -956,6 +1001,7 @@ fn main() {
         fps_t: Instant::now(),
         frames: 0,
         title: String::new(),
+        browser_ui: None,
     };
     el.run_app(&mut app).expect("run");
 }

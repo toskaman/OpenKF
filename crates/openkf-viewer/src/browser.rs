@@ -1,12 +1,12 @@
-//! Server browser (v2): favorites + recent + LAN + direct IP, with live details.
+//! Server browser (v3): favorites + recent + LAN + internet + direct IP.
 //!
 //! KF1 dedicated servers answer the GameSpy `\status\` query on `game + 10`
 //! (default 7717) with hostname, map, and player counts, so every saved
 //! server shows live details. `lan` discovers servers on the local network
-//! via broadcast. There is no internet list: the old UDP masters
-//! (`hl2master.steampowered.com`, GameSpy) are gone and KF1 does not speak
-//! A2S; a Steamworks `ISteamMatchmakingServers` (or Steam Web API
-//! `IGameServersService/GetServerList` + key) source is future work.
+//! via broadcast; `net` lists internet servers through the Steam Web API
+//! (`IGameServersService/GetServerList`, needs a free key). The old UDP
+//! masters (`hl2master.steampowered.com`, GameSpy) are gone and KF1 does
+//! not speak A2S, so there is no keyless internet source.
 //! Lists live in `%LOCALAPPDATA%\OpenKF` (`favorites.txt`, `recent.txt`).
 
 use std::net::{SocketAddr, SocketAddrV4};
@@ -115,6 +115,38 @@ pub fn lan() -> Vec<(String, openkf_network::browser::GameSpyStatus)> {
         .collect()
 }
 
+/// Steam Web API key: `OPENKF_STEAM_API_KEY` env or `%LOCALAPPDATA%\OpenKF\steam_api_key.txt`.
+pub fn steam_api_key() -> Option<String> {
+    if let Some(k) = std::env::var("OPENKF_STEAM_API_KEY").ok().filter(|k| !k.trim().is_empty()) {
+        return Some(k.trim().to_string());
+    }
+    let p = dir().join("steam_api_key.txt");
+    std::fs::read_to_string(p).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+}
+
+/// Internet servers via the Steam Web API (needs a key, see [`steam_api_key`]).
+/// Each listed address is GameSpy-queried for details (parallel); silent ones
+/// are kept with no details. Returns (servers, error).
+pub fn net(limit: u32) -> (Vec<(String, Option<openkf_network::browser::GameSpyStatus>)>, Option<String>) {
+    let Some(key) = steam_api_key() else {
+        return (Vec::new(), Some("no Steam API key: set OPENKF_STEAM_API_KEY or save one to %LOCALAPPDATA%\\OpenKF\\steam_api_key.txt (free at steamcommunity.com/dev/apikey)".into()));
+    };
+    let addrs = match openkf_network::browser::SteamServerQuery::fetch_steam_web_list(&key, openkf_network::browser::KILLING_FLOOR_APP_ID, limit) {
+        Ok(a) => a,
+        Err(e) => return (Vec::new(), Some(format!("Steam Web API: {e}"))),
+    };
+    let mut out: Vec<(String, Option<openkf_network::browser::GameSpyStatus>)> = Vec::new();
+    std::thread::scope(|s| {
+        let hs: Vec<_> = addrs.iter().map(|a| s.spawn(|| (a.to_string(), details(&a.to_string())))).collect();
+        for h in hs {
+            out.push(h.join().unwrap());
+        }
+    });
+    // Answering servers first, then the silent ones.
+    out.sort_by_key(|(_, st)| st.is_none());
+    (out, None)
+}
+
 fn detail_line(st: &openkf_network::browser::GameSpyStatus) -> String {
     format!("{} | {} | {}/{} players", st.hostname, st.mapname, st.numplayers, st.maxplayers)
 }
@@ -125,6 +157,7 @@ fn detail_line(st: &openkf_network::browser::GameSpyStatus) -> String {
 pub fn pick() -> Option<String> {
     use std::io::{BufRead, Write};
     let mut lan_servers: Vec<(String, openkf_network::browser::GameSpyStatus)> = Vec::new();
+    let mut net_servers: Vec<(String, Option<openkf_network::browser::GameSpyStatus>)> = Vec::new();
     loop {
         let favs = favorites();
         let rec = recent();
@@ -174,10 +207,21 @@ pub fn pick() -> Option<String> {
                 addrs.push(addr.clone());
             }
         }
+        if !net_servers.is_empty() {
+            println!("-- internet (Steam) --");
+            for (addr, st) in &net_servers {
+                if addrs.contains(addr) {
+                    continue;
+                }
+                n += 1;
+                println!("{n:3}  {:21}  {}", addr, st.as_ref().map(detail_line).as_deref().unwrap_or("(silent)"));
+                addrs.push(addr.clone());
+            }
+        }
         if n == 0 {
             println!("(no saved servers yet)");
         }
-        println!("Enter a number, an ip:port, 'lan' to scan the local network, 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip-or-name>' to remove, or empty to quit.");
+        println!("Enter a number, an ip:port, 'lan' to scan the local network, 'net' for the Steam internet list, 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip-or-name>' to remove, or empty to quit.");
         print!("> ");
         let _ = std::io::stdout().flush();
         let mut line = String::new();
@@ -194,6 +238,17 @@ pub fn pick() -> Option<String> {
             if lan_servers.is_empty() {
                 println!("no LAN servers found");
             }
+            continue;
+        }
+        if line.eq_ignore_ascii_case("net") {
+            println!("fetching Steam internet list...");
+            let (servers, err) = net(50);
+            if let Some(e) = err {
+                println!("{e}");
+            } else if servers.is_empty() {
+                println!("no internet servers listed");
+            }
+            net_servers = servers;
             continue;
         }
         if let Some(rest) = line.strip_prefix("unfav ").or_else(|| line.strip_prefix("UNFAV ")) {

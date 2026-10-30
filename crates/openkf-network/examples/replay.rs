@@ -66,7 +66,7 @@ fn main() {
             }
             if std::env::var("DUMPCLASS").ok().as_deref() == Some(c.name.as_str()) {
                 for (i, f) in c.fields.iter().enumerate() {
-                    println!("  [{i}] {}.{} dim={} {:?} {:?}", f.owner, f.name, f.array_dim, f.ty, f.params.iter().map(|p| &p.0).collect::<Vec<_>>());
+                    println!("  [{i}] {}.{} dim={} {:?} {:?}", f.owner, f.name, f.array_dim, f.ty, f.params.iter().map(|p| (&p.0, format!("{:?}", p.2))).collect::<Vec<_>>());
                 }
                 let rest = r.clone().bits(r.remaining()).unwrap();
                 println!("  rest {} bits: {}", r.remaining(), (0..r.remaining()).map(|i| if rest[i>>3]>>(i&7)&1==1 {'1'} else {'0'}).collect::<String>());

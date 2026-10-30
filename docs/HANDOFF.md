@@ -1,3 +1,68 @@
+# Handoff (2026-10-30, late night — v1.9.0 done)
+
+## Done this session (v1.9.0)
+
+- **Articulated ragdolls** (`openkf-viewer::ragdoll`, 64 bones): joint
+  limits + spring-damper limbs; corpses flail then settle. Skinning
+  applies quaternion deltas post-multiplied (`skin.rs`). Tests:
+  `limbs_flail_then_settle`, `joint_limit_holds`, `seed_varies_fall_direction`,
+  `falls_and_settles_flat`.
+- **Projected decals** (`particles.rs`): surface-aligned basis, expiry,
+  budget recycles oldest. Tests: `decal_basis`, `decals_expire`,
+  `budget_recycles_oldest`.
+- **F2 in-viewport browser** (`browser_ui.rs`): 6-row overlay, cursor,
+  rescan, join; visually verified in-window (screenshot in README).
+  Tests: `lines_always_six`, `cursor_moves`, `pump_merges`.
+- **TLS + Steam Web API internet list** (`openkf-network::browser`):
+  `ureq` with `native-tls` (needs an explicit `AgentBuilder` TLS
+  connector, not the shortcuts) + `IGameServersService/GetServerList`
+  behind `OPENKF_STEAM_API_KEY`. Live 403 invalid-key path verified.
+  New deps: `ureq 2.12`, `serde_json 1.0` (workspace + network manifests).
+- **Perk auto-select fallback** (`live_view.rs`): after 10 s pawnless on a
+  custom gametype, send `SelectVeterancy` + `ServerRestartPlayer`. Gated
+  so retail gametypes are untouched.
+- **RGameType limbo verdict**: an 8-minute join on a custom-gametype
+  public server never opened a `KFHumanPawn` (no possession) even with
+  the fallback — H1 (perk flow is the missing piece) rejected for
+  `ServerPerks`-style servers. Documented in STATUS; retail spawns fine.
+- **Retail 120 FPS = hard engine ceiling**: windowed `MaxClientFrameRate`
+  is rewritten by the engine (only the `+400.0` format sticks in the
+  ini), and even fullscreen-exclusive 1600x900 at cap 400 reads 117 cur
+  / 120 avg `stat fps`. Proof shot: `docs/screenshots/shot-retail-cap.png`.
+  Retail `KillingFloor.ini` restored afterwards (120.000000, windowed).
+- **English client**: HUD/console strings translated (`DOSH`, sounds);
+  `£` has no bitmap-font glyph so dosh reads `DOSH 300`.
+- **Benchmarks re-run** (see BENCHMARKS.md): solo 671 FPS / 0.14 s load /
+  713 MB; live 95-99 FPS at 150-158 actors in wave combat with kills;
+  retail 3.32 s / 597 MB. Live is down from v1.8.0's 201 (new per-frame
+  effects cost) — reported honestly, profiling is next.
+- **Toolchain note**: scoop's `mingw-winlibs` dlltool is an i686-only
+  build (default machine `i386`, no `i386:x86-64`) and fails fresh
+  `windows-sys` builds with `invalid bfd target`. Fix: put scoop `gcc`'s
+  `bin` (binutils 2.45.1, default `i386:x86-64`) first in `PATH` before
+  any `cargo build`. MSVC users are unaffected.
+- `scripts/bench.ps1` kills stale `UCC.exe` before starting the local
+  server (a leftover holding port 7717 used to wedge the live run).
+- **Transient crash cluster (not a regression)**: 3 windowed-live joins in
+  a row aborted with `memory allocation failed` right after a stuck
+  PresentMon run left a stale ETW session and SIGKILLed processes behind.
+  v1.8.0 survived the same map, debug survived too, and 10/10 targeted
+  release re-runs after the system quiesced were clean — no new `unsafe`,
+  no suspicious diff, no repro. Verdict: environmental fallout, not a
+  code bug. If it ever recurs, suspect GPU/ETW wedging first.
+
+## Suggested next steps (updated)
+
+1. Profile the live frame time (95-99 FPS vs 201 in v1.8.0): find whether
+   ragdoll articulation, projected decals, or particles dominate, and
+   budget accordingly (fewer active ragdolls, decal LOD).
+2. Custom-gametype spawn: trace what `ServerPerks`-style servers need
+   after `SelectVeterancy` (retail packet capture of a working client).
+3. Steam Web API key UX: document where to get a key, cache the list.
+4. 3D browser polish (mouse, server details pane) if time allows.
+
+---
+
 # Handoff (2026-10-30, night — v1.8.0 done)
 
 ## Done this session (v1.8.0)

@@ -72,15 +72,52 @@ impl SkinRig {
 
     /// Skinned point positions (mesh space) for `seq` at `time` seconds.
     pub fn pose_points(&self, seq: usize, time: f32) -> Vec<Vec3> {
+        self.pose_points_with(seq, time, None)
+    }
+
+    #[cfg(test)]
+    fn unit_rig() -> SkinRig {
+        use openkf_package::{Bone, Influence};
+        let mesh = SkeletalMesh {
+            name: "t".into(),
+            version: 0,
+            textures: vec![],
+            materials: vec![],
+            mesh_scale: [1.0; 3],
+            mesh_origin: [0.0; 3],
+            rot_origin: [0; 3],
+            bones: vec![
+                Bone { name: "root".into(), flags: 0, orientation: [0.0, 0.0, 0.0, 1.0], position: [0.0; 3], num_children: 1, parent: -1 },
+                Bone { name: "arm".into(), flags: 0, orientation: [0.0, 0.0, 0.0, 1.0], position: [0.0, 0.0, 10.0], num_children: 0, parent: 0 },
+            ],
+            animation: 0,
+            points: vec![[0.0, 0.0, 20.0]],
+            wedges: vec![],
+            triangles: vec![],
+            influences: vec![Influence { weight: 1.0, point: 0, bone: 1 }],
+        };
+        SkinRig::new(Arc::new(mesh), None)
+    }
+
+    /// Same, with per-bone local-rotation deltas post-multiplied (ragdolls).
+    /// `delta[i]` is the extra rotation in bone-local space (identity = none);
+    /// bones past the slice keep their animated/reference rotation.
+    pub fn pose_points_with(&self, seq: usize, time: f32, delta: Option<&[[f32; 4]]>) -> Vec<Vec3> {
         let m = &self.mesh;
         let sample = self.anim.as_ref().map(|a| a.sample(seq, time)).unwrap_or_default();
         let locals: Vec<Mat4> = m
             .bones
             .iter()
             .enumerate()
-            .map(|(i, b)| match self.bone_map[i].and_then(|ai| sample.get(ai).copied().flatten()) {
-                Some((q, p)) => local(q, p, i == 0),
-                None => local(b.orientation, b.position, i == 0),
+            .map(|(i, b)| {
+                let l = match self.bone_map[i].and_then(|ai| sample.get(ai).copied().flatten()) {
+                    Some((q, p)) => local(q, p, i == 0),
+                    None => local(b.orientation, b.position, i == 0),
+                };
+                match delta.and_then(|d| d.get(i)) {
+                    Some(dq) => l * Mat4::from_quat(Quat::from_array(*dq)),
+                    None => l,
+                }
             })
             .collect();
         let g = globals(&locals, &self.parents);
@@ -93,5 +130,33 @@ impl SkinRig {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ref_pose_is_identity() {
+        let r = SkinRig::unit_rig();
+        let pts = r.pose_points(0, 0.0);
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0] - Vec3::new(0.0, 0.0, 20.0)).length() < 1e-4, "{:?}", pts[0]);
+    }
+
+    #[test]
+    fn ragdoll_delta_rotates_limb() {
+        let r = SkinRig::unit_rig();
+        let ident = [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]];
+        let same = r.pose_points_with(0, 0.0, Some(&ident));
+        assert!((same[0] - Vec3::new(0.0, 0.0, 20.0)).length() < 1e-4, "{same:?}");
+        // 90 deg about X on the arm: the point swings from +Z to -Y/+Y.
+        let q = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2).to_array();
+        let bent = r.pose_points_with(0, 0.0, Some(&[[0.0, 0.0, 0.0, 1.0], q]));
+        assert!(!bent[0].x.is_nan() && !bent[0].y.is_nan() && !bent[0].z.is_nan(), "{bent:?}");
+        assert!((bent[0] - Vec3::new(0.0, 0.0, 20.0)).length() > 5.0, "{bent:?}");
+        // Rotation about the bone origin [0,0,10]: stays 10 from it.
+        assert!(((bent[0] - Vec3::new(0.0, 0.0, 10.0)).length() - 10.0).abs() < 1e-3, "{bent:?}");
     }
 }

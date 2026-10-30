@@ -80,6 +80,12 @@ pub enum SteamQueryError {
 
     #[error("Failed challenge verification with server {0}")]
     ChallengeFailed(SocketAddrV4),
+
+    #[error("DNS resolution failed: {0}")]
+    Dns(String),
+
+    #[error("Steam Web API error: {0}")]
+    WebApi(String),
 }
 
 /// Server host operating environment
@@ -601,6 +607,52 @@ impl SteamServerQuery {
         Err(SteamQueryError::Timeout(game_addr))
     }
 
+    /// Internet server list via the Steam Web API
+    /// (`IGameServersService/GetServerList`, needs a free key from
+    /// steamcommunity.com/dev/apikey). Returns game addresses; query each
+    /// with [`SteamServerQuery::query_gamespy_status`] for details.
+    /// NOTE: the API returns the GAME port (`addr` field).
+    pub fn fetch_steam_web_list(api_key: &str, app_id: u32, limit: u32) -> Result<Vec<SocketAddrV4>, SteamQueryError> {
+        let url = format!(
+            "https://api.steampowered.com/IGameServersService/GetServerList/v1/?key={api_key}&filter=%5Cappid%5C{app_id}&limit={limit}"
+        );
+        // SChannel TLS via an explicit agent (ureq 2.x never picks native-tls
+        // as the default connector for the `ureq::get` shortcuts).
+        let connector = std::sync::Arc::new(ureq::native_tls::TlsConnector::new().map_err(|e| SteamQueryError::WebApi(e.to_string()))?);
+        let agent = ureq::builder().tls_connector(connector).build();
+        let body = agent
+            .get(&url)
+            .timeout(Duration::from_secs(15))
+            .call()
+            .map_err(|e| match &e {
+                ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
+                    SteamQueryError::WebApi(format!("{e} (invalid API key?)"))
+                }
+                _ => SteamQueryError::WebApi(e.to_string()),
+            })?
+            .into_string()
+            .map_err(|e| SteamQueryError::WebApi(e.to_string()))?;
+        Self::parse_steam_web_list(&body)
+    }
+
+    /// Parses a `GetServerList` JSON body into game addresses.
+    pub fn parse_steam_web_list(body: &str) -> Result<Vec<SocketAddrV4>, SteamQueryError> {
+        let v: serde_json::Value = serde_json::from_str(body).map_err(|e| SteamQueryError::WebApi(format!("bad JSON: {e}")))?;
+        let mut out = Vec::new();
+        if let Some(arr) = v.pointer("/response/servers").and_then(|s| s.as_array()) {
+            for s in arr {
+                if let Some(addr) = s.get("addr").and_then(|a| a.as_str()) {
+                    if let Ok(SocketAddr::V4(v4)) = addr.parse::<SocketAddr>() {
+                        out.push(v4);
+                    } else if let Ok(ip) = addr.parse::<Ipv4Addr>() {
+                        out.push(SocketAddrV4::new(ip, 7707));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Discovers KF1 servers on the LAN: broadcasts `\status\` to `query_port`
     /// and collects replies until `listen` elapses. Returns (game addr, status).
     pub fn scan_lan(&self, query_port: u16, listen: Duration) -> Vec<(SocketAddrV4, GameSpyStatus)> {
@@ -981,5 +1033,26 @@ mod tests {
         let query = SteamServerQuery::new().with_timeout(Duration::from_millis(200));
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 59999);
         assert!(matches!(query.query_gamespy_status(addr), Err(SteamQueryError::Timeout(_))));
+    }
+
+    #[test]
+    fn test_parse_steam_web_list() {
+        let body = r#"{"response":{"servers":[
+            {"addr":"1.2.3.4:7707","gameport":7707,"steamid":"9001","name":"A","appid":1250,"gamedir":"KillingFloor","version":"1065","product":"KillingFloor","region":3,"players":2,"max_players":6,"bots":0,"map":"KF-WestLondon","secure":true,"dedicated":true,"os":"w","gametype":"KFGameType"},
+            {"addr":"5.6.7.8","gameport":7707,"steamid":"9002","name":"B","appid":1250,"gamedir":"KillingFloor","version":"1065","product":"KillingFloor","region":3,"players":0,"max_players":6,"bots":0,"map":"KF-Farm","secure":true,"dedicated":true,"os":"l","gametype":"KFGameType"},
+            {"addr":"not-an-address","gameport":0,"steamid":"9003"}
+        ]}}"#;
+        let list = SteamServerQuery::parse_steam_web_list(body).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 7707));
+        // Bare IP defaults to the KF game port.
+        assert_eq!(list[1], SocketAddrV4::new(Ipv4Addr::new(5, 6, 7, 8), 7707));
+    }
+
+    #[test]
+    fn test_parse_steam_web_list_rejects_garbage() {
+        assert!(SteamServerQuery::parse_steam_web_list("not json").is_err());
+        // Valid JSON, no servers -> empty list (not an error).
+        assert!(SteamServerQuery::parse_steam_web_list(r#"{"response":{}}"#).unwrap().is_empty());
     }
 }

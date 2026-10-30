@@ -126,6 +126,8 @@ pub struct PawnView {
     pub roll: i32,
     /// True while a Karma ragdoll drives this corpse (no death anim).
     pub ragdoll: bool,
+    /// Articulated ragdoll bone deltas (mesh bone order), when `ragdoll`.
+    pub ragdoll_bones: Option<Vec<[f32; 4]>>,
     pub speed: f32,
     /// Locomotion sequence for the current velocity (`MovementAnims(0..3)` /
     /// `WalkAnims` / `CrouchAnims` of the class, picked by direction vs. yaw).
@@ -348,6 +350,9 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
         let mut view_anim: Option<(String, Instant, f32)> = None;
         let mut anim_reload_seen = Instant::now();
         let mut readied = false;
+        let mut readied_at = Instant::now();
+        // Custom perk gametypes (ServerPerks): no pawn until a perk is picked.
+        let mut perk_tried = false;
         let mut last_move = Instant::now();
         let mut flee_dir: Option<[f32; 2]> = None;
         let mut stuck_ref = ([0.0f32; 3], Instant::now());
@@ -501,7 +506,7 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                                         if let Some(a) = c.session.as_ref().and_then(|s| s.actors.get(ch)) {
                                             let mut s = sh.lock().unwrap();
                                             s.particles.burst(a.location, 24, [0.55, 0.03, 0.02, 0.95], 260.0, 0.9, 10.0, 1.0);
-                                            s.particles.decal([a.location[0], a.location[1], a.location[2] - 30.0], [0.25, 0.01, 0.01, 0.85], 46.0, 12.0);
+                                            s.particles.decal([a.location[0], a.location[1], a.location[2] - 30.0], [0.0, 0.0, 1.0], [0.25, 0.01, 0.01, 0.85], 46.0, 12.0);
                                         }
                                     }
                                 }
@@ -511,7 +516,7 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                                         if let Some(a) = c.session.as_ref().and_then(|s| s.actors.get(ch)) {
                                             let mut s = sh.lock().unwrap();
                                             s.particles.burst(a.location, 24, [0.55, 0.03, 0.02, 0.95], 260.0, 0.9, 10.0, 1.0);
-                                            s.particles.decal([a.location[0], a.location[1], a.location[2] - 30.0], [0.25, 0.01, 0.01, 0.85], 46.0, 12.0);
+                                            s.particles.decal([a.location[0], a.location[1], a.location[2] - 30.0], [0.0, 0.0, 1.0], [0.25, 0.01, 0.01, 0.85], 46.0, 12.0);
                                         }
                                     }
                                 }
@@ -561,6 +566,28 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                         println!("[Live] ServerRestartPlayer: {e}");
                     }
                     readied = true;
+                    readied_at = Instant::now();
+                    perk_tried = false;
+                }
+            }
+            // Custom perk servers (ServerPerks/RGameType): still pawnless 10 s
+            // after ready -> pick a stock perk explicitly, then restart again.
+            // Retail servers spawn without this, so it only fires when needed.
+            if readied && !perk_tried && readied_at.elapsed() > Duration::from_secs(10) && c.pawn_channel().is_none() {
+                perk_tried = true;
+                if let Some(ch) = c.controller_channel() {
+                    let vet = ["KFMod.KFVetCommando", "KFMod.KFVetFieldMedic", "KFMod.KFVetSupportSpec"]
+                        .iter()
+                        .find_map(|v| c.session.as_ref().and_then(|s| s.schema.object_index(v)).map(|i| (*v, i)));
+                    match vet {
+                        Some((name, idx)) => {
+                            println!("[Live] no pawn after ready, selecting perk {name}");
+                            if let Err(e) = c.call_rpc(ch, "SelectVeterancy", &[("VetSkill", openkf_network::props::Value::Object(idx)), ("bForceChange", openkf_network::props::Value::Bool(true))]) {
+                                println!("[Live] SelectVeterancy: {e}");
+                            }
+                        }
+                        None => println!("[Live] no pawn after ready, no perk class in schema"),
+                    }
                 }
             }
             // Possession: the server ignores our moves until we acknowledge the pawn
@@ -921,6 +948,7 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                         pitch: 0,
                         roll: 0,
                         ragdoll: false,
+                        ragdoll_bones: None,
                         speed: v[0].hypot(v[1]),
                         move_anim: d.and_then(|d| movement_anim(d, cls, v, yaw, walking, crouched)),
                         idle_anim: d.and_then(|d| idle_anim(d, cls, crouched)),
@@ -957,6 +985,7 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                 p.pitch = pitch;
                 p.roll = roll;
                 p.ragdoll = true;
+                p.ragdoll_bones = Some(r.bones());
             }
             // Movable static meshes: pickups and projectiles.
             let mut props = Vec::new();
@@ -1064,7 +1093,7 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                 let zeds_total = c.session.as_ref().map_or(0, |ss| ss.actors.values().filter(|a| a.class.chain.iter().any(|x| x == "KFMonster")).count());
                 let gri = |k: &str| c.session.as_ref().and_then(|ss| ss.actors.values().find(|a| a.class.is_a("GameReplicationInfo")).and_then(|a| a.props.get(k).cloned()));
                 let mypawn = |k: &str| c.session.as_ref().and_then(|ss| c.pawn_channel().and_then(|pc| ss.actors.get(&pc)).and_then(|a| a.props.get(k).cloned()));
-                let audio_s = audio.as_ref().map(|a| format!("sons {} (echecs {sounds_failed})", a.played)).unwrap_or_default();
+                let audio_s = audio.as_ref().map(|a| format!("sounds {} (failed {sounds_failed})", a.played)).unwrap_or_default();
                 s.status_extra = format!(
                     "{audio_s} | props {}/{} hidden | {}",
                     props.len(),
@@ -1074,7 +1103,7 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                     gri("bWaveInProgress"), gri("TimeToNextWave"), mypawn("Physics"), mypawn("bTearOff")
                 ));
                 let dosh_s = match &dosh { Some(Value::Float(f)) => format!("{f:.0}"), _ => "?".into() };
-                s.hud = format!("HP {health} | AMMO {ammo} | GRENADES {nades} | KILLS {kills} | WAVE {wave} | {dosh_s} POUNDS");
+                s.hud = format!("HP {health} | AMMO {ammo} | GRENADES {nades} | KILLS {kills} | WAVE {wave} | DOSH {dosh_s}");
                 // While downloads hold the handshake, the HUD shows progress instead.
                 if c.downloading() {
                     if let Some(dl) = download_hud_line(&c) {
@@ -1112,6 +1141,7 @@ pub fn start(server: SocketAddr, kf: PathBuf, auth: Option<AuthConfig>, name: St
                         c = n;
                         shown = 0;
                         readied = false;
+                        perk_tried = false;
                         acked_pawn = None;
                         armed_for = None;
                         weapon = None;

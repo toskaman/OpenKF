@@ -7,21 +7,23 @@ your legally installed game data (maps, meshes, textures, sounds).
 
 ![Solo: KF-WestLondon](docs/screenshots/shot-solo.png)
 ![Live: wave combat on a dedicated server](docs/screenshots/shot-live.png)
+![In-game server browser (F2)](docs/screenshots/shot-browser.png)
 ![Custom map on a public modded server](docs/screenshots/shot-custom.png)
 
-## Highlights (v1.8.0)
+## Highlights (v1.9.0)
 
 - **Live multiplayer**: handshake, Steam auth, actor replication, RPCs, movement,
   firing, reloading, grenades, trader purchases, server travel, auto-reconnect.
 - **Content downloads**: FastDL (HTTP redirect, `.uz2`), the retail download
   cache (`Cache/Cache.ini`), and in-connection `ChannelDownload` (`CHTYPE_FILE`)
   for maps missing from the redirect — all in the background with a progress bar.
-- **Combat effects**: particle bursts (blood, muzzle flash, smoke), sticky
-  decals, Karma ragdoll corpses.
+- **Combat effects**: particle bursts (blood, muzzle flash, smoke), surface-
+  projected decals, articulated multi-body Karma ragdolls.
 - **Sound**: 3D positional audio, nested `SoundGroup`s, 2839/2839 custom
   sounds decode with zero failures.
-- **Server browser** (`--browse`): favorites + recents + direct IP with live
-  GameSpy details (hostname, map, players), plus LAN discovery (`lan`).
+- **Server browser**: favorites + recents + direct IP with live GameSpy
+  details (hostname, map, players), LAN discovery, an internet list via
+  the Steam Web API, and an in-viewport overlay (F2) — no console needed.
 - **Benchmarks**: headless `--bench` orbit and PresentMon presented-FPS;
   retail vs OpenKF numbers below.
 
@@ -32,16 +34,20 @@ Method + raw data: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 | Client | Scene | FPS | Map load | Peak RAM | CPU | Threads |
 |---|---|---|---|---|---|---|
-| OpenKF | solo | 651 | 0.39 s | 835 MB | 10% | 30 |
-| OpenKF | live, 162 actors | 201 | 0.27 s | 1084 MB | 0.2% | 33 |
-| Retail v1065 | solo | 120 (engine cap) | 3.26 s | 596 MB | 5% | 45 |
+| OpenKF | solo | 671 | 0.14 s | 713 MB | 11% | 31 |
+| OpenKF | live, ~155 actors | 95-99 | 0.14 s | 1085 MB | 2% | 33 |
+| Retail v1065 | solo | 120 (hard engine cap) | 3.32 s | 597 MB | 5% | 47 |
 
-Presented FPS (PresentMon, 20 s, windowed): OpenKF 313 FPS average in a loaded
-live scene vs retail's 120 FPS engine-capped solo baseline.
+Presented FPS (PresentMon, 20 s, windowed live wave combat): OpenKF 236 FPS
+average vs retail's 120 FPS hard-capped baseline (proven: fullscreen-exclusive
+with `MaxClientFrameRate=400` still reads 120 avg — see
+[the proof shot](docs/screenshots/shot-retail-cap.png)).
 
-OpenKF loads maps ~8x faster and uses RAM on par with retail after the memory
-work (memory-mapped packages, shared pool meshes) — see the benchmarks doc
-for findings and variance notes.
+OpenKF loads maps ~24x faster and uses RAM on par with retail (memory-mapped
+packages, shared pool meshes). Live orbit FPS is down from v1.8.0's 201 —
+the cost of per-frame articulated ragdolls and projected decals; real play
+(narrower frustum than the orbit) stays well above 60 — see the benchmarks
+doc for findings and variance notes.
 
 ## Requirements
 
@@ -57,6 +63,10 @@ for findings and variance notes.
 cargo build --release -p openkf-viewer
 # -> target\release\openkf-viewer.exe
 ```
+
+GNU toolchain note: scoop's `mingw-winlibs` ships an i686-only `dlltool`
+that fails 64-bit import libraries (`invalid bfd target`). Put scoop `gcc`'s
+`bin` first in `PATH` before building. MSVC users are unaffected.
 
 ## Use
 
