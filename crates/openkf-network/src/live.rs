@@ -139,7 +139,7 @@ impl LiveClient {
     pub fn connect(server: SocketAddr, kf_dir: &Path, auth: AuthConfig, player_name: &str) -> std::io::Result<Self> {
         let sock = UdpSocket::bind("0.0.0.0:0")?;
         sock.set_nonblocking(true)?;
-        let url = format!("Index.rom?Class=Engine.Pawn?Character=Corporal_Lewis?team=1?Sex=M?Name={player_name}");
+        let url = format!("Index.rom?Class=Engine.Pawn?Character=Corporal_Lewis?team=1?Sex=M?Name={player_name}?VAC=1");
         let mut c = Self {
             sock,
             server,
@@ -619,9 +619,10 @@ impl LiveClient {
                     st ^= st << 5;
                     st as u8
                 });
-                let auth = format!("AUTH HASH={} GM={gm}", self.auth.cd_key_hash);
+                // Retail v1065 appends empty USERNAME / PASSWORD; strict servers drop logins without them.
+                let auth = format!("AUTH HASH={} GM={gm} USERNAME= PASSWORD=", self.auth.cd_key_hash);
                 self.send_control(&auth, false);
-                self.send_control("NETSPEED 15000", false);
+                self.send_control("NETSPEED 25000", false);
                 let login = format!("LOGIN RESPONSE={} URL={}", challenge_response(ch), self.url);
                 self.send_control(&login, false);
                 self.state = LiveState::Challenged;

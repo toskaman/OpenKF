@@ -21,3 +21,9 @@
 - Retail client joins the public test server fine; OpenKF gets STEAMENCRYPTIONKEY + CHALLENGE, sends AUTH/LOGIN, then the server stays silent (no WELCOME). Name is not the cause.
 - Added `TerminateGameConnection` before `InitiateGameConnection` and on client drop (retail behaviour); live verification pending.
 - Next: record a retail join with `openkf-netcap` (relay) and diff the AUTH / LOGIN / Steam blob messages against OpenKF's (the STEAMTICKET chunks with SIZE=1 are a suspect).
+
+## Retail capture diff (public modded server)
+- Retail join captured through `openkf-netcap` (captures stay local, never committed).
+- Control messages now match retail: `AUTH ... USERNAME= PASSWORD=`, `NETSPEED 25000`, `?VAC=1` in the LOGIN URL. Challenge response and GMD5 verified identical to retail.
+- Server still silent after LOGIN for OpenKF only. Remaining differences are below the control layer (packet acks / timing; retail sends the Steam blob ~1.7 s after STEAMENCRYPTIONKEY) or Steam-side session state.
+- Next: capture OpenKF through the same relay and diff packet by packet against the retail capture.
