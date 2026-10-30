@@ -63,6 +63,26 @@ pub struct Scene {
     pub stats: String,
 }
 
+impl Scene {
+    /// Drop CPU-side upload data after the GPU copies are made: decoded
+    /// texture mips, lightmap mips, and (unless kept for `--pick`) batch
+    /// vertices/indices. Frees ~165 MB on KF-WestLondon.
+    pub fn release_cpu_uploads(&mut self, keep_verts: bool) {
+        for t in &mut self.textures {
+            t.mips = Vec::new();
+        }
+        for l in &mut self.lightmaps {
+            l.mips = Vec::new();
+        }
+        if !keep_verts {
+            for b in &mut self.batches {
+                b.vertices = Vec::new();
+                b.indices = Vec::new();
+            }
+        }
+    }
+}
+
 #[inline]
 fn conv(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], p[1]]
@@ -146,6 +166,10 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
         }
         let mt = surf_tex[n.i_surf as usize];
         let tex = mt.map(|m| m.0);
+        if let (Some(hide), Some(ti)) = (std::env::var_os("OPENKF_HIDE_TEX"), tex) {
+            let tn = tt.refs[ti].pkg().format_full_name(tt.refs[ti].export as i32 + 1);
+            if tn.to_ascii_lowercase().contains(&hide.to_string_lossy().to_ascii_lowercase()) { continue; }
+        }
         let mut blend = mt.map(|m| m.1).unwrap_or(Blend::Opaque);
         if blend == Blend::Opaque {
             if s.poly_flags & PF_TRANSLUCENT != 0 {
@@ -432,9 +456,19 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
                 if key.1 == Blend::Invisible {
                     continue;
                 }
+                if let (Some(hide), Some(ti)) = (std::env::var_os("OPENKF_HIDE_TEX"), key.0) {
+                    let tn = tt.refs[ti].pkg().format_full_name(tt.refs[ti].export as i32 + 1);
+                    if tn.to_ascii_lowercase().contains(&hide.to_string_lossy().to_ascii_lowercase()) { continue; }
+                }
                 let e = acc.by_tex.entry(key).or_default();
                 let mut remap: HashMap<u16, u32> = HashMap::new();
+                // Mirrored placements (negative determinant, e.g. the WestLondon
+                // tunnel shells with DrawScale3D.y < 0) flip facing: reverse the
+                // winding so the faces point outward again instead of being
+                // backface-culled (see-through tunnel walls).
+                let mirror = pl.is_mirrored();
                 for t in m.section_triangles(s) {
+                    let t = if mirror { [t[2], t[1], t[0]] } else { t };
                     for &i in &t {
                         let idx = *remap.entry(i).or_insert_with(|| {
                             let k = i as usize;
@@ -461,9 +495,19 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
     let t_bake = t0.elapsed();
 
     // Decode textures in parallel.
+    let debug_magenta = std::env::var_os("OPENKF_MAGENTA_TEX").map(|s| s.to_string_lossy().to_string());
     let textures: Vec<TextureData> = tt.refs
         .par_iter()
         .map(|&t| {
+            if let Some(m) = &debug_magenta {
+                let tn = t.pkg().format_full_name(t.export as i32 + 1);
+                if tn.to_ascii_lowercase().contains(&m.to_ascii_lowercase()) {
+                    return TextureData {
+                        width: 4, height: 4, format: crate::assets::TexFormat::Rgba8,
+                        mips: vec![vec![255, 0, 255, 255].repeat(16)], alpha_test: false, luminance: false,
+                    };
+                }
+            }
             decode_texture(t, bc_supported).unwrap_or(TextureData {
                 width: 1,
                 height: 1,
@@ -475,6 +519,13 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
         })
         .collect();
     let t_tex = t0.elapsed();
+    if std::env::var_os("OPENKF_DEBUG").is_some() {
+        for (i, t) in textures.iter().enumerate() {
+            let b0: String = t.mips.first().map(|m| m.iter().take(16).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join("")).unwrap_or_default();
+            let fmt = match t.format { crate::assets::TexFormat::Bc1 => "Bc1", crate::assets::TexFormat::Bc2 => "Bc2", crate::assets::TexFormat::Bc3 => "Bc3", crate::assets::TexFormat::Rgba8 => "Rgba8" };
+            eprintln!("[debug] tx[{i}] {fmt} {}x{} at={} mips={} b0={b0}", t.width, t.height, t.alpha_test, t.mips.len());
+        }
+    }
 
     let merged = bsp.merge(baked);
     let mut batches: Vec<Batch> = merged
@@ -513,12 +564,38 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
             }
         }
     }
+    if std::env::var_os("OPENKF_DEBUG").is_some() {
+        for i in 0..map.exports.len() {
+            let cn = export_class_name(map, i);
+            if cn.ends_with("ZoneInfo") || cn.ends_with("SkyZoneInfo") || cn.ends_with("KFZoneInfo") {
+                if let Ok(p) = read_object_properties(map, i) {
+                    eprintln!("[debug] zone {i} {cn}: AmbientBrightness={:?} AmbientSaturation={:?}",
+                        p.get("AmbientBrightness"), p.get("AmbientSaturation"));
+                }
+            }
+        }
+    }
 
+    if std::env::var_os("OPENKF_DEBUG").is_some() {
+        for (bi, b) in batches.iter().enumerate() {
+            let bad_p = b.vertices.iter().filter(|v| !v.pos.iter().all(|x| x.is_finite())).count();
+            let bad_n = b.vertices.iter().filter(|v| !v.nrm.iter().all(|x| x.is_finite())).count();
+            let bad_u = b.vertices.iter().filter(|v| !v.uv.iter().all(|x| x.is_finite())).count();
+            let oob = b.indices.iter().filter(|&&i| i as usize >= b.vertices.len()).count();
+            if bad_p + bad_n + bad_u + oob > 0 {
+                let tn = b.texture.map(|t| tt.refs[t].pkg().format_full_name(tt.refs[t].export as i32 + 1)).unwrap_or_default();
+                eprintln!("[debug] batch {bi} {:?} {tn}: verts={} bad pos/nrm/uv={bad_p}/{bad_n}/{bad_u} oob_idx={oob}", b.blend, b.vertices.len());
+            }
+        }
+    }
     let tris: usize = batches.iter().map(|b| b.indices.len() / 3).sum::<usize>()
         + terrains.iter().map(|t| t.indices.len() / 3 * t.layers.len().max(1)).sum::<usize>();
+    let tex_mb: f64 = textures.iter().map(|t| t.mips.iter().map(|m| m.len()).sum::<usize>()).sum::<usize>() as f64 / 1e6;
+    let vtx_mb: f64 = batches.iter().map(|b| b.vertices.len() * size_of::<Vertex>() + b.indices.len() * 4).sum::<usize>() as f64 / 1e6;
+    let lm_mb: f64 = model.lightmaps.iter().map(|l| l.mips.iter().map(|m| m.len()).sum::<usize>()).sum::<usize>() as f64 / 1e6;
     eprintln!("[spawn] UE location {:?}, yaw {:.0} deg", [spawn_pos[0], spawn_pos[2], spawn_pos[1]], spawn_yaw.to_degrees());
     let stats = format!(
-        "{map_name}: {} animated actors, {} props, {} lightmaps, {} terrain(s), {} BSP polys, {} placements ({} unique meshes, {unresolved} unresolved), {} textures, {} batches, {tris} triangles | resolve {:.0} ms, bake {:.0} ms, textures {:.0} ms",
+        "{map_name}: {} animated actors, {} props, {} lightmaps, {} terrain(s), {} BSP polys, {} placements ({} unique meshes, {unresolved} unresolved), {} textures, {} batches, {tris} triangles, cpu tex/vtx/lm {tex_mb:.0}/{vtx_mb:.0}/{lm_mb:.0} MB | resolve {:.0} ms, bake {:.0} ms, textures {:.0} ms",
         actors.len(),
         props.len(),
         model.lightmaps.len(),

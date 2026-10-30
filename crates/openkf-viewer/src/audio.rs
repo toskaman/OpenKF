@@ -11,10 +11,16 @@ pub struct Audio {
     engine: Arc<Mutex<AudioEngine>>,
     rate: u32,
     cache: HashMap<u32, Option<Arc<WavSound>>>,
+    /// Insertion order for FIFO eviction (cache is bounded).
+    order: Vec<u32>,
     #[cfg(windows)]
     _stream: cpal::Stream,
     pub played: u64,
 }
+
+/// Decoded sounds kept in RAM; past this the oldest half is evicted.
+/// Sounds re-decode on demand, so eviction only costs a hitch.
+const MAX_CACHED_SOUNDS: usize = 1024;
 
 /// Why a sound could not be played (for diagnostics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,13 +90,13 @@ impl Audio {
             )
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok(Self { engine, rate, cache: HashMap::new(), _stream: stream, played: 0 })
+        Ok(Self { engine, rate, cache: HashMap::new(), order: Vec::new(), _stream: stream, played: 0 })
     }
 
     #[cfg(not(windows))]
     pub fn open() -> Result<Self, String> {
         // No device backend here: mix into the void (keeps the code path testable).
-        Ok(Self { engine: Arc::new(Mutex::new(AudioEngine::new())), rate: 44100, cache: HashMap::new(), played: 0 })
+        Ok(Self { engine: Arc::new(Mutex::new(AudioEngine::new())), rate: 44100, cache: HashMap::new(), order: Vec::new(), played: 0 })
     }
 
     pub fn set_listener(&self, pos: [f32; 3], yaw_ue: i32) {
@@ -116,7 +122,14 @@ impl Audio {
                 let wav = openkf_package::sound::embedded_wav(&data).ok_or(PlayFail::NoRiff)?;
                 let w = WavSound::parse(wav).map_err(|_| PlayFail::BadWav)?;
                 let snd = Some(Arc::new(resample(&w, rate)));
-                e.insert(snd).clone()
+                let out = e.insert(snd).clone();
+                self.order.push(key);
+                if self.order.len() > MAX_CACHED_SOUNDS {
+                    for old in self.order.drain(..MAX_CACHED_SOUNDS / 2) {
+                        self.cache.remove(&old);
+                    }
+                }
+                out
             }
         };
         // Do not cache failures: a package that arrives later (channel download)
@@ -159,5 +172,19 @@ mod tests {
         assert_eq!(a.try_play(4243, || Some(vec![0u8; 64]), [0.0; 3], 300.0, 1.0, 1.0), Err(PlayFail::NoRiff));
         // Truncated RIFF -> BadWav.
         assert_eq!(a.try_play(4244, || Some(b"RIFF\xff\xff\xff\xffWAVE".to_vec()), [0.0; 3], 300.0, 1.0, 1.0), Err(PlayFail::BadWav));
+    }
+
+    #[test]
+    fn cache_evicts_oldest_half_past_cap() {
+        let mut a = match Audio::open() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        for k in 0..(MAX_CACHED_SOUNDS as u32 + 100) {
+            let _ = a.try_play(100_000 + k, || Some(wav_export()), [0.0; 3], 300.0, 1.0, 1.0);
+        }
+        assert!(a.cache.len() <= MAX_CACHED_SOUNDS, "cache len {}", a.cache.len());
+        assert!(!a.cache.contains_key(&100_000), "oldest key should be evicted");
+        assert!(a.cache.contains_key(&(100_000 + MAX_CACHED_SOUNDS as u32 + 99)), "newest key kept");
     }
 }

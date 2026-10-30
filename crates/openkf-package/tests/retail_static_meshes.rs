@@ -44,3 +44,37 @@ fn decode_all_retail_static_meshes() {
     assert!(ok > 4000, "only {ok} meshes parsed");
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+fn placement_with_scale(ds: f32, ds3d: [f32; 3]) -> MeshPlacement {
+    MeshPlacement {
+        actor: String::new(), class: String::new(), mesh: String::new(), mesh_ref: 0,
+        location: [0.0; 3], rotation: [0; 3], draw_scale: ds, draw_scale_3d: ds3d,
+        pre_pivot: [0.0; 3], hidden: false, skins: Vec::new(),
+        vertex_colors: Vec::new(), unlit: false,
+    }
+}
+
+#[test]
+fn mirrored_placement_detection() {
+    // Negative determinant: uniform scale counts 3x (sign(ds^3) == sign(ds)).
+    assert!(!placement_with_scale(1.0, [1.0, 1.0, 1.0]).is_mirrored());
+    assert!(!placement_with_scale(1.0, [-1.0, -1.0, 1.0]).is_mirrored()); // two flips = rotation
+    assert!(!placement_with_scale(2.0, [1.0, 2.0, 1.0]).is_mirrored());
+    assert!(placement_with_scale(-1.0, [1.0, 1.0, 1.0]).is_mirrored()); // uniform -1: det -1
+    assert!(placement_with_scale(1.0, [1.0, -1.0, 1.0]).is_mirrored()); // WestLondon Car_Tunnel
+    assert!(placement_with_scale(1.0, [1.0, -2.0, 1.0]).is_mirrored()); // Car_Tunnel_Front_Wall
+}
+
+#[test]
+fn westlondon_has_mirrored_tunnel_shells() {
+    // Guards the premise of the winding fix: the mapper mirrors tunnel shells.
+    let Some(dir) = kf_dir() else { return };
+    let data = std::fs::read(dir.join("Maps/KF-WestLondon.rom")).unwrap();
+    let pkg = UnrealPackage::from_bytes(&data).unwrap();
+    let mirrored: Vec<_> = static_mesh_placements(&pkg)
+        .into_iter()
+        .filter(|p| p.is_mirrored() && p.mesh.contains("Tunnel"))
+        .collect();
+    assert!(!mirrored.is_empty(), "expected mirrored Car_Tunnel placements");
+    assert!(mirrored.iter().any(|p| p.mesh.contains("Car_Tunnel_Front_Wall")), "{}", mirrored.iter().map(|p| p.mesh.as_str()).collect::<Vec<_>>().join(","));
+}

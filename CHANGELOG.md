@@ -11,6 +11,31 @@ All notable changes to OpenKF. Dates are 2026.
   showed through (the "white floor" reports). Fan winding is now aligned
   per node with the surf normal using Newell's method. Verified on
   KF-WestLondon, KF-Manor and KF-Offices; screenshots refreshed.
+- **Mirrored static meshes no longer see-through**: placements with a
+  negative-determinant scale (the mapper mirrors tunnel shells with
+  `DrawScale3D.y < 0`) kept their authored winding, so every face was
+  backface-culled from inside — the WestLondon road tunnel rendered as a
+  black void. Winding is now reversed for mirrored placements (the
+  existing `is_mirrored` helper, previously unused). The tunnel interior
+  renders with brick walls.
+- **Stale black vertex lighting no longer renders pitch black**: some
+  `StaticMeshInstance` color streams contain exactly-zero verts (lighting
+  never rebuilt for those faces — e.g. the church end caps in
+  KF-WestLondon, seen as a floating "black quad" against the sky). The
+  vertex-color shading branch is now floored at 45% of the approximate
+  (hemispheric + key) shading: deep shadow stays dark but textured.
+- **Fleshpound chest renders its glow**: all skeletal-mesh sections of
+  an actor shared the single opaque pipeline, so the amber chest
+  capacitor (`FinalBlend`, brighten) drew as a black square. Sections now
+  each use their own pipeline (opaque / alpha / additive / modulate).
+- **Bounded sound cache**: decoded sounds are capped at 1024 entries with
+  FIFO eviction of the oldest half (re-decode on demand), instead of
+  growing unbounded in long sessions.
+- **Lower steady-state RAM**: CPU-side texture/lightmap mips and (outside
+  `--pick`) batch vertices are released after GPU upload (~165 MB saved
+  on KF-WestLondon).
+- **FPS cap**: `--fps N` (default 120, `0` = uncapped) caps the live loop,
+  cutting CPU usage roughly in half at the same perceived smoothness.
 
 ### Added
 - `--pick px,py` diagnostic: raycasts through a screen pixel and prints
@@ -18,6 +43,14 @@ All notable changes to OpenKF. Dates are 2026.
   culled street batches.
 - More `OPENKF_DEBUG` scene diagnostics (node paths, texture index table,
   non-opaque surfs, translucent mesh sections, floor winding).
+- Pick now reports per-hit facing (front/back vs the rendered side) and
+  the hit triangle's vertex lights + UVs (`OPENKF_DEBUG`).
+- `OPENKF_HIDE_TEX=<substr>` / `OPENKF_MAGENTA_TEX=<substr>` bake-time
+  debug hooks to isolate a texture's on-screen contribution.
+- `static_dump` package example: lists static mesh sections (material,
+  UV/position bounds) for mesh triage.
+- `is_mirrored` unit tests + retail test asserting WestLondon's mirrored
+  tunnel shells.
 
 ## v1.9.0 — Articulated ragdolls, decals, in-game browser, internet list (October 30)
 

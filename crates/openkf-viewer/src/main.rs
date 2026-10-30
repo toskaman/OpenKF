@@ -58,6 +58,7 @@ struct Args {
     browse: bool,
     bench: usize,
     pick: Option<(u32, u32)>,
+    fps: u32,
 }
 
 fn parse_args() -> Args {
@@ -80,6 +81,7 @@ fn parse_args() -> Args {
         browse: false,
         bench: 0,
         pick: None,
+        fps: 120,
     };
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -99,6 +101,7 @@ fn parse_args() -> Args {
             "--connect" => a.connect = Some(it.next().expect("--connect host:port")),
             "--browse" => a.browse = true,
             "--bench" => a.bench = it.next().expect("--bench <frames>").parse().unwrap(),
+            "--fps" => a.fps = it.next().expect("--fps <n>").parse().unwrap(),
             "--pick" => {
                 let s = it.next().expect("--pick <px,py>");
                 let (x, y) = s.split_once(',').expect("px,py");
@@ -223,7 +226,7 @@ fn pick_pixel(scene: &scene::Scene, cam: &Camera, w: u32, h: u32, px: u32, py: u
     let near = inv * ndc;
     let ro = cam.pos;
     let rd = (glam::Vec3::new(near.x, near.y, near.z) / near.w - ro).normalize();
-    let mut hits: Vec<(f32, usize, [f32; 2], [f32; 2], [f32; 3])> = Vec::new();
+    let mut hits: Vec<(f32, usize, [f32; 2], [f32; 2], [f32; 3], bool)> = Vec::new();
     for (bi, b) in scene.batches.iter().enumerate() {
         for tri in b.indices.chunks_exact(3) {
             let p = |i: u32| glam::Vec3::from(b.vertices[i as usize].pos);
@@ -249,8 +252,12 @@ fn pick_pixel(scene: &scene::Scene, cam: &Camera, w: u32, h: u32, px: u32, py: u
             let uv = [w0 * a.uv[0] + u * bb.uv[0] + v * c.uv[0], w0 * a.uv[1] + u * bb.uv[1] + v * c.uv[1]];
             let lm = [w0 * a.lm_uv[0] + u * bb.lm_uv[0] + v * c.lm_uv[0], w0 * a.lm_uv[1] + u * bb.lm_uv[1] + v * c.lm_uv[1]];
             let hit = (ro + rd * t).to_array();
-            if !hits.iter().any(|(ht, hbi, _, _, _)| *hbi == bi && (*ht - t).abs() < 1.0) {
-                hits.push((t, bi, uv, lm, hit));
+            if !hits.iter().any(|(ht, hbi, _, _, _, _)| *hbi == bi && (*ht - t).abs() < 1.0) {
+                // det>0: ray hits the CCW front side = the side the renderer draws.
+                hits.push((t, bi, uv, lm, hit, det > 0.0));
+                if std::env::var_os("OPENKF_DEBUG").is_some() {
+                    eprintln!("[debug] pick tri b{bi} t={t:.0} lights {:?} {:?} {:?} uvs [{:.2},{:.2}] [{:.2},{:.2}] [{:.2},{:.2}]", a.light, bb.light, c.light, a.uv[0], a.uv[1], bb.uv[0], bb.uv[1], c.uv[0], c.uv[1]);
+                }
             }
         }
     }
@@ -259,10 +266,21 @@ fn pick_pixel(scene: &scene::Scene, cam: &Camera, w: u32, h: u32, px: u32, py: u
     if hits.is_empty() {
         println!("[Pick] ({px},{py}) no hit");
     }
-    for (t, bi, uv, lm, hit) in hits {
+    for (t, bi, uv, lm, hit, front) in hits {
         let b = &scene.batches[bi];
-        println!("[Pick] ({px},{py}) batch {bi} blend={:?} tex={:?} lightmap={} t={t:.0} uv=[{:.2},{:.2}] lm=[{:.3},{:.3}] at [{:.0},{:.0},{:.0}] tris={}",
-            b.blend, b.texture, b.lightmap, uv[0], uv[1], lm[0], lm[1], hit[0], hit[1], hit[2], b.indices.len() / 3);
+        let mut an = [0.0f32; 3];
+        for v in &b.vertices {
+            an[0] += v.nrm[0];
+            an[1] += v.nrm[1];
+            an[2] += v.nrm[2];
+        }
+        let l = (an[0] * an[0] + an[1] * an[1] + an[2] * an[2]).sqrt().max(1e-9);
+        let finite_v = b.vertices.iter().filter(|v| v.pos.iter().all(|x| x.is_finite())).count();
+        let finite_n = b.vertices.iter().filter(|v| v.nrm.iter().all(|x| x.is_finite())).count();
+        let finite_u = b.vertices.iter().filter(|v| v.uv.iter().all(|x| x.is_finite())).count();
+        let n = b.vertices.len();
+        println!("[Pick] ({px},{py}) batch {bi} blend={:?} tex={:?} lightmap={} t={t:.0} uv=[{:.2},{:.2}] lm=[{:.3},{:.3}] at [{:.0},{:.0},{:.0}] tris={} {} finite pos/nrm/uv {finite_v}/{finite_n}/{finite_u}/{n} avgn=[{:.2},{:.2},{:.2}]",
+            b.blend, b.texture, b.lightmap, uv[0], uv[1], lm[0], lm[1], hit[0], hit[1], hit[2], b.indices.len() / 3, if front { "FRONT" } else { "back" }, an[0] / l, an[1] / l, an[2] / l);
     }
 }
 fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync::Arc<std::sync::Mutex<live_view::Shared>>>, live_pool: Vec<(String, String, usize)>) {
@@ -421,6 +439,7 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
     }
     let fmt = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut r = render::Renderer::new(&device, &queue, fmt, &scene);
+    scene.release_cpu_uploads(args.pick.is_some());
     println!("[Load] total {:.0} ms (BC passthrough: {bc})", t.elapsed().as_secs_f64() * 1e3);
     let (w, h) = args.size;
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -574,6 +593,7 @@ struct App {
     title: String,
     title_extra: String,
     browser_ui: Option<browser_ui::BrowserUi>,
+    next_frame: Instant,
 }
 
 /// Join another server: restart the client onto it (fresh connection + scene).
@@ -927,6 +947,13 @@ impl ApplicationHandler for App {
                     g.hud.draw(&g.device, &g.queue, &view, g.config.width, g.config.height, &ui.lines(), false);
                 }
                 frame.present();
+                // Frame pacing: cap interactive FPS so the client doesn't spin
+                // CPU/GPU at 700+ FPS windowed. 0 = uncapped (benchmarks).
+                if self.args.fps > 0 {
+                    let budget = std::time::Duration::from_secs_f32(1.0 / self.args.fps as f32);
+                    self.next_frame = now + budget;
+                    el.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+                }
 
                 self.frames += 1;
                 let el_s = self.fps_t.elapsed().as_secs_f32();
@@ -955,7 +982,11 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
         if let Some(g) = &self.gfx {
-            g.window.request_redraw();
+            // Gated by the frame pacer: without this the redraw request
+            // bypasses WaitUntil and the cap never engages.
+            if self.args.fps == 0 || Instant::now() >= self.next_frame {
+                g.window.request_redraw();
+            }
         }
     }
 }
@@ -1063,6 +1094,7 @@ fn main() {
         frames: 0,
         title: String::new(),
         browser_ui: None,
+        next_frame: Instant::now(),
     };
     el.run_app(&mut app).expect("run");
 }

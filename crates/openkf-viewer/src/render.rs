@@ -37,10 +37,10 @@ pub struct Renderer {
     lightmap_bgs: Vec<wgpu::BindGroup>,
     batches: Vec<GpuBatch>,
     terrain_pipeline: wgpu::RenderPipeline,
-    /// Animated actors: dynamic vertex buffer + per-slot (index buffer, count, material bind).
-    actors: Vec<(wgpu::Buffer, Vec<(wgpu::Buffer, u32, usize)>)>,
+    /// Animated actors: dynamic vertex buffer + per-slot (index buffer, count, material bind, pipeline).
+    actors: Vec<(wgpu::Buffer, Vec<(wgpu::Buffer, u32, usize, Option<usize>)>)>,
     /// Movable static meshes: same layout as `actors` (dynamic vertex buffer per pool slot).
-    props: Vec<(wgpu::Buffer, Vec<(wgpu::Buffer, u32, usize)>)>,
+    props: Vec<(wgpu::Buffer, Vec<(wgpu::Buffer, u32, usize, Option<usize>)>)>,
     /// Props drawn this frame (hidden pool slots are skipped entirely).
     prop_visible: Vec<bool>,
     /// (vertex buffer, index buffer, index count, per-layer bind groups)
@@ -473,14 +473,23 @@ impl Renderer {
                         triangles += idx.len() as u64 / 3;
                         let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(idx), usage: wgpu::BufferUsages::INDEX });
                         let bind = mt.map(|m| m.0).unwrap_or(fallback_tex) * 3 + if matches!(mt.map(|m| m.1), Some(Blend::Masked)) { 1 } else { 2 };
-                        (ib, idx.len() as u32, bind)
+                        // Per-slot pipeline: glow/additive sections (e.g. the
+                        // Fleshpound's amber chest) must not use opaque.
+                        let pipe = match mt.map(|m| m.1) {
+                            Some(Blend::Alpha) => Some(1),
+                            Some(Blend::Additive) => Some(2),
+                            Some(Blend::Modulate) => Some(3),
+                            Some(Blend::Invisible) => None,
+                            _ => Some(0),
+                        };
+                        (ib, idx.len() as u32, bind, pipe)
                     })
                     .collect();
                 (vb, slots)
             })
             .collect();
 
-        let props: Vec<(wgpu::Buffer, Vec<(wgpu::Buffer, u32, usize)>)> = scene
+        let props: Vec<(wgpu::Buffer, Vec<(wgpu::Buffer, u32, usize, Option<usize>)>)> = scene
             .props
             .iter()
             .map(|p| {
@@ -496,7 +505,14 @@ impl Renderer {
                     .map(|(mt, idx)| {
                         let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(idx), usage: wgpu::BufferUsages::INDEX });
                         let bind = mt.map(|m| m.0).unwrap_or(fallback_tex) * 3 + if matches!(mt.map(|m| m.1), Some(Blend::Masked)) { 1 } else { 2 };
-                        (ib, idx.len() as u32, bind)
+                        let pipe = match mt.map(|m| m.1) {
+                            Some(Blend::Alpha) => Some(1),
+                            Some(Blend::Additive) => Some(2),
+                            Some(Blend::Modulate) => Some(3),
+                            Some(Blend::Invisible) => None,
+                            _ => Some(0),
+                        };
+                        (ib, idx.len() as u32, bind, pipe)
                     })
                     .collect();
                 (vb, slots)
@@ -619,7 +635,9 @@ impl Renderer {
                 let props = self.props.iter().enumerate().filter(|(i, _)| vis.get(*i).copied().unwrap_or(false)).map(|(_, p)| p);
                 for (vb, slots) in self.actors.iter().chain(props) {
                     pass.set_vertex_buffer(0, vb.slice(..));
-                    for (ib, count, bind) in slots {
+                    for (ib, count, bind, pipe) in slots {
+                        let Some(pi) = pipe else { continue };
+                        pass.set_pipeline(&self.pipelines[*pi]);
                         pass.set_bind_group(1, &self.material_bgs[*bind], &[]);
                         pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..*count, 0, 0..1);

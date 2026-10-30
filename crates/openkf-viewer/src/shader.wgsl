@@ -55,7 +55,10 @@ fn fs_main(i: VOut) -> @location(0) vec4<f32> {
     let approx = vec3<f32>(hemi + 0.35 * max(dot(n, l), 0.0));
     // UE2 static mesh lighting: texture * 2 * baked vertex color.
     // light.a: 1.0 = baked vertex color, ~0.25 = BSP lightmap, 0 = approximate.
-    var shade = select(approx, i.light.rgb * 2.0, i.light.a > 0.5);
+    // Baked black (stale/unrebuilt instance colors) would render pitch black,
+    // so floor the vertex-color branch at 45% of the approximate shading: deep
+    // shadow stays dark but textured instead of a flat black slab.
+    var shade = select(approx, max(i.light.rgb * 2.0, approx * 0.45), i.light.a > 0.5);
     shade = select(shade, lm * 2.0, i.light.a > 0.1 && i.light.a < 0.5);
     var rgb = c.rgb * shade;
     let d = distance(i.wpos, g.cam_pos.xyz);

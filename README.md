@@ -9,6 +9,8 @@ your legally installed game data (maps, meshes, textures, sounds).
 ![Live: wave combat on a dedicated server](docs/screenshots/shot-live.png)
 ![In-game server browser (F2)](docs/screenshots/shot-browser.png)
 ![Custom map on a public modded server](docs/screenshots/shot-custom.png)
+![WestLondon road tunnel interior](docs/screenshots/shot-tunnel.png)
+![Fleshpound close-up](docs/screenshots/shot-fleshpound.png)
 
 ## Highlights (v1.9.0)
 
