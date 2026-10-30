@@ -1,12 +1,15 @@
-//! Server browser (v1): favorites + recent + direct IP.
+//! Server browser (v2): favorites + recent + LAN + direct IP, with live details.
 //!
-//! The old UDP master servers (`hl2master.steampowered.com`, GameSpy) are gone
-//! and KF1 dedicated servers do not answer A2S/GameSpy queries in a usable
-//! way, so there is no internet list yet (needs Steamworks
-//! `ISteamMatchmakingServers`, future work). This browser manages direct
-//! servers instead: named favorites, auto-saved recents, and manual entry.
+//! KF1 dedicated servers answer the GameSpy `\status\` query on `game + 10`
+//! (default 7717) with hostname, map, and player counts, so every saved
+//! server shows live details. `lan` discovers servers on the local network
+//! via broadcast. There is no internet list: the old UDP masters
+//! (`hl2master.steampowered.com`, GameSpy) are gone and KF1 does not speak
+//! A2S; a Steamworks `ISteamMatchmakingServers` (or Steam Web API
+//! `IGameServersService/GetServerList` + key) source is future work.
 //! Lists live in `%LOCALAPPDATA%\OpenKF` (`favorites.txt`, `recent.txt`).
 
+use std::net::{SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,13 +92,58 @@ pub fn valid_addr(s: &str) -> bool {
     s.rsplit_once(':').is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok()) && std::net::ToSocketAddrs::to_socket_addrs(s).is_ok()
 }
 
-/// Interactive pick: numbered favorites + recents, or a typed `ip:port`.
-/// `fav`/`unfav` edit the list and re-prompt; empty input / EOF quits.
+fn resolve_v4(s: &str) -> Option<SocketAddrV4> {
+    std::net::ToSocketAddrs::to_socket_addrs(s).ok()?.find_map(|a| match a {
+        SocketAddr::V4(v) => Some(v),
+        _ => None,
+    })
+}
+
+/// Live GameSpy details for one game address (`None` when offline).
+pub fn details(addr: &str) -> Option<openkf_network::browser::GameSpyStatus> {
+    let v4 = resolve_v4(addr)?;
+    let q = openkf_network::browser::SteamServerQuery::new().with_timeout(std::time::Duration::from_millis(600));
+    q.query_gamespy_status(v4).ok()
+}
+
+/// Discovers LAN servers (broadcast `\status\` on the default query port).
+pub fn lan() -> Vec<(String, openkf_network::browser::GameSpyStatus)> {
+    let q = openkf_network::browser::SteamServerQuery::new();
+    q.scan_lan(7707 + openkf_network::browser::KF_QUERY_PORT_OFFSET, std::time::Duration::from_secs(2))
+        .into_iter()
+        .map(|(a, st)| (a.to_string(), st))
+        .collect()
+}
+
+fn detail_line(st: &openkf_network::browser::GameSpyStatus) -> String {
+    format!("{} | {} | {}/{} players", st.hostname, st.mapname, st.numplayers, st.maxplayers)
+}
+
+/// Interactive pick: numbered favorites + recents + LAN, or a typed `ip:port`.
+/// `fav`/`unfav` edit the list, `lan` scans the local network; re-prompts
+/// after each; empty input / EOF quits.
 pub fn pick() -> Option<String> {
     use std::io::{BufRead, Write};
+    let mut lan_servers: Vec<(String, openkf_network::browser::GameSpyStatus)> = Vec::new();
     loop {
         let favs = favorites();
         let rec = recent();
+        // Live details for saved servers, queried in parallel (600 ms each max).
+        let mut probe: Vec<String> = favs.iter().map(|e| e.addr.clone()).collect();
+        for e in rec.iter().filter(|e| !favs.iter().any(|f| f.addr == e.addr)) {
+            probe.push(e.addr.clone());
+        }
+        let mut info: std::collections::HashMap<String, String> = Default::default();
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for addr in &probe {
+                handles.push(s.spawn(|| (addr.clone(), details(addr).map(|st| detail_line(&st)))));
+            }
+            for h in handles {
+                let (addr, d) = h.join().unwrap();
+                info.insert(addr, d.unwrap_or_else(|| "(offline)".to_string()));
+            }
+        });
         println!("=== OpenKF servers ===");
         let mut n = 0usize;
         let mut addrs: Vec<String> = Vec::new();
@@ -103,7 +151,7 @@ pub fn pick() -> Option<String> {
             println!("-- favorites --");
             for e in &favs {
                 n += 1;
-                println!("{n:3}  {:24}  {}", e.addr, e.name);
+                println!("{n:3}  {:21}  {:24}  {}", e.addr, e.name, info.get(&e.addr).map(String::as_str).unwrap_or(""));
                 addrs.push(e.addr.clone());
             }
         }
@@ -111,14 +159,25 @@ pub fn pick() -> Option<String> {
             println!("-- recent --");
             for e in rec.iter().filter(|e| !favs.iter().any(|f| f.addr == e.addr)) {
                 n += 1;
-                println!("{n:3}  {}", e.addr);
+                println!("{n:3}  {:21}  {}", e.addr, info.get(&e.addr).map(String::as_str).unwrap_or(""));
                 addrs.push(e.addr.clone());
+            }
+        }
+        if !lan_servers.is_empty() {
+            println!("-- lan --");
+            for (addr, st) in &lan_servers {
+                if addrs.contains(addr) {
+                    continue;
+                }
+                n += 1;
+                println!("{n:3}  {:21}  {}", addr, detail_line(st));
+                addrs.push(addr.clone());
             }
         }
         if n == 0 {
             println!("(no saved servers yet)");
         }
-        println!("Enter a number, an ip:port, 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip-or-name>' to remove, or empty to quit.");
+        println!("Enter a number, an ip:port, 'lan' to scan the local network, 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip-or-name>' to remove, or empty to quit.");
         print!("> ");
         let _ = std::io::stdout().flush();
         let mut line = String::new();
@@ -128,6 +187,14 @@ pub fn pick() -> Option<String> {
         let line = line.trim().to_string();
         if line.is_empty() {
             return None;
+        }
+        if line.eq_ignore_ascii_case("lan") {
+            println!("scanning LAN for KF1 servers...");
+            lan_servers = lan();
+            if lan_servers.is_empty() {
+                println!("no LAN servers found");
+            }
+            continue;
         }
         if let Some(rest) = line.strip_prefix("unfav ").or_else(|| line.strip_prefix("UNFAV ")) {
             let what = rest.trim();

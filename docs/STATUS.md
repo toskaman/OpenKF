@@ -1,6 +1,6 @@
 # Project status
 
-Last update: 2026-10-30 (v1.7.0).
+Last update: 2026-10-30 (v1.8.0).
 
 ## Working (tested against a local KF v1065 dedicated server)
 
@@ -20,24 +20,29 @@ Last update: 2026-10-30 (v1.7.0).
 | 3D sound (nested SoundGroups, typed failures, no failure caching) | `openkf-viewer::audio`, `openkf-audio` |
 | FastDL + retail cache + ChannelDownload, background with progress bar | `openkf-network::download`, `live` |
 | Particles, decals, Karma ragdolls | `openkf-viewer::particles`, `ragdoll` |
-| Server browser (favorites / recents / direct) | `--browse`, `openkf-viewer::browser` |
-| Headless benchmarks | `--bench`, `scripts/bench.ps1` |
+| Server browser (favorites / recents / LAN / direct, live details) | `--browse`, `openkf-viewer::browser` |
+| Headless benchmarks + PresentMon presented FPS | `--bench`, `scripts/bench.ps1` |
 
-## Verified numbers (v1.7.0)
+## Verified numbers (v1.8.0)
 
-- Live, KF-WestLondon, 30 s: 154 actors, 10 pawns, 3 kills, 90 sounds with
-  0 failures, 77 particles, 0 bunch decode failures.
+- Live, KF-WestLondon, 25 s: 162 actors, 7 pawns, 2 kills, 50 sounds with
+  0 failures, decode failures 0.
+- Custom sounds: 2839/2839 decode across all custom packages, 0 failures
+  (`sound_sweep` example through the exact live chain).
+- Public modded server: joins as spectator, custom map renders; rejoin
+  downloads nothing (all GUIDs cached).
 - Channel download of 4 KB / 15 KB / 1.2 MB from a retail server, GUID-checked.
-- Full workspace suite green; release build with zero warnings.
-- Benchmarks: solo 670 FPS / 0.29 s load; live 103 FPS at 155 actors; retail
-  3.29 s load / 682 MB / 6% CPU (see `docs/BENCHMARKS.md`).
+- Full workspace suite green; release build clean.
+- Benchmarks: solo 651 FPS / 0.39 s load / 835 MB; live 201 FPS at
+  162 actors / 1084 MB; retail 3.26 s load / 596 MB / 5% CPU; presented
+  FPS 313 (OpenKF live) vs 120 (retail solo cap) — see `docs/BENCHMARKS.md`.
 
 ## Known limits
 
-- Retail FPS has no automated capture yet (manual `stat fps`); see benchmarks doc.
-- No internet server list: the UDP masters are gone and KF1 answers no usable
-  query protocol — needs Steamworks `ISteamMatchmakingServers`.
+- No internet server list: the UDP masters are dead (NXDOMAIN, no A2S) —
+  needs Steamworks `ISteamMatchmakingServers` or the Steam Web API list.
+  Direct queries (GameSpy `\status\`) and LAN discovery work.
 - Channel downloads are throttled by the server (~14 KB/s at `NETSPEED 25000`);
-  big maps take minutes. Higher `NETSPEED` during downloads is untried.
-- RAM is higher than retail (decoded assets stay resident).
+  big files take minutes. A `NETSPEED` boost was measured to have no effect
+  (throttle is per-tick, not rate-based); retail-exact 25000 is kept.
 - Single-body ragdolls (no articulation); decals are camera-facing quads.

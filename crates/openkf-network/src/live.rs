@@ -1003,3 +1003,159 @@ impl Drop for LiveClient {
         }
     }
 }
+
+#[cfg(test)]
+mod live_netspeed_tests {
+    use super::*;
+    use std::net::UdpSocket;
+
+    /// Minimal scripted peer: just enough UE2 to drive the client
+    /// `HELLO -> CHALLENGE -> LOGIN -> USES/DLMGR/WELCOME -> file bytes -> JOIN`.
+    struct MockServer {
+        sock: UdpSocket,
+        out_id: u32,
+        ch0_seq: u32,
+        file_seq: u32,
+        sent_challenge: bool,
+        sent_welcome: bool,
+        file_ch: Option<u32>,
+        file_served: bool,
+    }
+
+    impl MockServer {
+        fn send(&mut self, to: SocketAddr, bunches: Vec<Bunch>, acks: Vec<u32>) {
+            let mut items: Vec<Item> = acks.into_iter().map(Item::Ack).collect();
+            items.extend(bunches.into_iter().map(Item::Bunch));
+            let bytes = (Packet { id: self.out_id, items }).encode().unwrap();
+            self.out_id = (self.out_id + 1) % MAX_PACKET_ID;
+            self.sock.send_to(&bytes, to).unwrap();
+        }
+
+        fn control(&mut self, msg: &str) -> Bunch {
+            let mut w = BitsOut::new();
+            w.fstring(msg);
+            let (data, bits) = w.into_parts();
+            self.ch0_seq += 1;
+            Bunch { control: false, open: false, close: false, reliable: true, ch_index: 0, ch_sequence: Some(self.ch0_seq), ch_type: Some(CHTYPE_CONTROL), data_bits: bits, data }
+        }
+
+        fn file_close(&mut self, ch: u32) -> Bunch {
+            self.file_seq += 1;
+            Bunch { control: true, open: false, close: true, reliable: true, ch_index: ch, ch_sequence: Some(self.file_seq), ch_type: Some(CHTYPE_FILE), data_bits: 128, data: vec![0u8; 16] }
+        }
+    }
+
+    /// Full download handshake against the mock: missing package -> file
+    /// channel open -> bytes + close -> schema -> JOIN, with a retail-exact
+    /// `NETSPEED 25000` throughout (a higher download rate was tried against a
+    /// retail server and made no difference: 90.5 s vs 90.6 s for 1.2 MB —
+    /// the file throttle is a fixed per-tick slot, not rate-based).
+    #[test]
+    fn channel_download_handshake_reaches_join_at_retail_netspeed() {
+        let tag = format!("openkf-netspeed-{}", std::process::id());
+        let base = std::env::temp_dir().join(tag);
+        let kf = base.join("kf");
+        let dl = base.join("dl");
+        std::fs::create_dir_all(&kf).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        let prev_dl = std::env::var_os("OPENKF_DOWNLOADS");
+        // SAFETY: only this test reads OPENKF_DOWNLOADS; no other unit test
+        // touches the download dir.
+        unsafe { std::env::set_var("OPENKF_DOWNLOADS", &dl) };
+
+        let mock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        mock.set_nonblocking(true).unwrap();
+        let mock_addr = mock.local_addr().unwrap();
+        let mut srv = MockServer { sock: mock, out_id: 0, ch0_seq: 0, file_seq: 0, sent_challenge: false, sent_welcome: false, file_ch: None, file_served: false };
+
+        let auth = AuthConfig {
+            steam_id: "12345".into(),
+            cd_key_hash: DEFAULT_CD_KEY_HASH.into(),
+            gmd5: DEFAULT_GMD5,
+            steam_blob: Vec::new(),
+            live_steam: false,
+        };
+        let mut c = LiveClient::connect(mock_addr, &kf, auth, "Test").unwrap();
+
+        let mut saw_hello = false;
+        let mut saw_login = false;
+        let t0 = Instant::now();
+        let joined = loop {
+            let _ = c.poll();
+            // Drain the mock socket.
+            let mut buf = [0u8; 2048];
+            let mut acks = Vec::new();
+            let mut client_addr = None;
+            loop {
+                match srv.sock.recv_from(&mut buf) {
+                    Ok((n, from)) => {
+                        client_addr = Some(from);
+                        let Ok(p) = Packet::decode(&buf[..n]) else { continue };
+                        acks.push(p.id);
+                        for it in p.items {
+                            let Item::Bunch(b) = it else { continue };
+                            if b.ch_index == 0 && b.reliable {
+                                for m in control_messages(&b).unwrap_or_default() {
+                                    if m.starts_with("HELLO ") {
+                                        saw_hello = true;
+                                    } else if m.starts_with("LOGIN ") {
+                                        saw_login = true;
+                                    }
+                                }
+                            }
+                            if b.ch_type == Some(CHTYPE_FILE) && b.open {
+                                srv.file_ch = Some(b.ch_index);
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if let Some(to) = client_addr {
+                if saw_hello && !srv.sent_challenge {
+                    srv.sent_challenge = true;
+                    let b = srv.control("CHALLENGE CHALLENGE=123 GZ=0 VER=3339");
+                    srv.send(to, vec![b], std::mem::take(&mut acks));
+                } else if saw_login && !srv.sent_welcome {
+                    srv.sent_welcome = true;
+                    let uses = srv.control("USES GUID=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA PKG=FakePack FLAGS=1 SIZE=16 GEN=1 FNAME=FakePack.u");
+                    let dlmgr = srv.control("DLMGR CLASS=Engine.ChannelDownload PARAMS=Enabled COMPRESSION=0");
+                    let welcome = srv.control("WELCOME LEVEL=KF-Test");
+                    srv.send(to, vec![uses, dlmgr, welcome], std::mem::take(&mut acks));
+                } else if let (Some(ch), false) = (srv.file_ch, srv.file_served) {
+                    srv.file_served = true;
+                    let b = srv.file_close(ch);
+                    srv.send(to, vec![b], std::mem::take(&mut acks));
+                } else if !acks.is_empty() {
+                    srv.send(to, Vec::new(), acks);
+                }
+            }
+            if c.log.iter().any(|l| l == "C>S JOIN") {
+                break true;
+            }
+            if t0.elapsed() > Duration::from_secs(10) {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+
+        // Restore env and clean up before asserting so failures don't leak state.
+        unsafe {
+            match prev_dl {
+                Some(v) => std::env::set_var("OPENKF_DOWNLOADS", v),
+                None => std::env::remove_var("OPENKF_DOWNLOADS"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(joined, "client never reached JOIN; log:\n{}", c.log.join("\n"));
+        assert!(
+            c.log.iter().any(|l| l.contains("requesting FakePack.u")),
+            "file channel was never opened; log:\n{}",
+            c.log.join("\n")
+        );
+        let nets: Vec<&str> = c.log.iter().filter_map(|l| l.strip_prefix("C>S NETSPEED ")).collect();
+        assert!(!nets.is_empty(), "no NETSPEED sent at all");
+        assert!(nets.iter().all(|v| *v == "25000"), "non-retail netspeed sent: {nets:?}");
+    }
+}

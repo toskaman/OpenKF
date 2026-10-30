@@ -7,8 +7,9 @@ your legally installed game data (maps, meshes, textures, sounds).
 
 ![Solo: KF-WestLondon](docs/screenshots/shot-solo.png)
 ![Live: wave combat on a dedicated server](docs/screenshots/shot-live.png)
+![Custom map on a public modded server](docs/screenshots/shot-custom.png)
 
-## Highlights (v1.7.0)
+## Highlights (v1.8.0)
 
 - **Live multiplayer**: handshake, Steam auth, actor replication, RPCs, movement,
   firing, reloading, grenades, trader purchases, server travel, auto-reconnect.
@@ -17,9 +18,12 @@ your legally installed game data (maps, meshes, textures, sounds).
   for maps missing from the redirect — all in the background with a progress bar.
 - **Combat effects**: particle bursts (blood, muzzle flash, smoke), sticky
   decals, Karma ragdoll corpses.
-- **Sound**: 3D positional audio, nested `SoundGroup`s, zero failures on retail data.
-- **Server browser**: favorites + recents + direct IP (`--browse`).
-- **Benchmarks**: headless `--bench` orbit; retail vs OpenKF numbers below.
+- **Sound**: 3D positional audio, nested `SoundGroup`s, 2839/2839 custom
+  sounds decode with zero failures.
+- **Server browser** (`--browse`): favorites + recents + direct IP with live
+  GameSpy details (hostname, map, players), plus LAN discovery (`lan`).
+- **Benchmarks**: headless `--bench` orbit and PresentMon presented-FPS;
+  retail vs OpenKF numbers below.
 
 ## Performance (real numbers)
 
@@ -28,12 +32,16 @@ Method + raw data: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 | Client | Scene | FPS | Map load | Peak RAM | CPU | Threads |
 |---|---|---|---|---|---|---|
-| OpenKF | solo | 670 | 0.29 s | 1239 MB | 13% | 30 |
-| OpenKF | live, 155 actors | 103 | 0.29 s | 2244 MB | 2% | 34 |
-| Retail v1065 | solo | manual (`stat fps`) | 3.29 s | 682 MB | 6% | 43 |
+| OpenKF | solo | 651 | 0.39 s | 835 MB | 10% | 30 |
+| OpenKF | live, 162 actors | 201 | 0.27 s | 1084 MB | 0.2% | 33 |
+| Retail v1065 | solo | 120 (engine cap) | 3.26 s | 596 MB | 5% | 45 |
 
-OpenKF loads maps ~11x faster; it currently uses more RAM (decoded assets stay
-resident) — see the benchmarks doc for findings and variance notes.
+Presented FPS (PresentMon, 20 s, windowed): OpenKF 313 FPS average in a loaded
+live scene vs retail's 120 FPS engine-capped solo baseline.
+
+OpenKF loads maps ~8x faster and uses RAM on par with retail after the memory
+work (memory-mapped packages, shared pool meshes) — see the benchmarks doc
+for findings and variance notes.
 
 ## Requirements
 
@@ -59,7 +67,7 @@ openkf-viewer KF-WestLondon --kf "C:\...\KillingFloor"
 # Join a server (IP from the browser, a friend, or a listing)
 openkf-viewer --connect 127.0.0.1:7717 --play
 
-# Server browser (favorites / recents / direct)
+# Server browser (favorites / recents / LAN / direct)
 openkf-viewer --browse
 
 # Headless screenshot + benchmark

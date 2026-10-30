@@ -11,11 +11,13 @@ use crate::assets::{AssetLibrary, Blend, Pkg};
 use crate::scene::Vertex;
 use openkf_package::*;
 use rayon::prelude::*;
+use std::sync::Arc;
 
 /// One pool slot.
 pub struct PropActor {
     pub name: String,
-    pub mesh: StaticMesh<'static>,
+    /// Shared across pool slots of the same mesh (parsed once in `spawn_pool`).
+    pub mesh: Arc<StaticMesh<'static>>,
     /// Per material slot: (texture index, blend) and triangle indices into mesh vertices.
     pub slots: Vec<(Option<(usize, Blend)>, Vec<u32>)>,
     pub visible: bool,
@@ -49,7 +51,7 @@ fn build_prop(lib: &mut AssetLibrary, pkg: &'static Pkg, i: usize, texture_for: 
             slots.push((mt, idx));
         }
     }
-    Some(PropActor { name: mesh.name.clone(), mesh, slots, visible: false, location: [0.0; 3], rotation: [0; 3], scale: [1.0; 3], pre_pivot: [0.0; 3] })
+    Some(PropActor { name: mesh.name.clone(), mesh: Arc::new(mesh), slots, visible: false, location: [0.0; 3], rotation: [0; 3], scale: [1.0; 3], pre_pivot: [0.0; 3] })
 }
 
 /// `count` hidden instances of each (package, static mesh name).
@@ -66,11 +68,13 @@ pub fn spawn_pool(lib: &mut AssetLibrary, pool: &[(String, String, usize)], mut 
             // caller maps by (package, mesh) through `Scene::prop_base`.
             continue;
         };
-        for _ in 0..*count {
-            match build_prop(lib, pkg, i, &mut texture_for) {
-                Some(p) => out.push(p),
-                None => break,
-            }
+        // Parse once: every slot shares the same mesh (Arc), only the small
+        // per-slot state (name/slots/transform) is cloned.
+        let Some(first) = build_prop(lib, pkg, i, &mut texture_for) else { continue };
+        out.push(first);
+        for _ in 1..*count {
+            let t = out.last().unwrap();
+            out.push(PropActor { name: t.name.clone(), mesh: Arc::clone(&t.mesh), slots: t.slots.clone(), visible: false, location: [0.0; 3], rotation: [0; 3], scale: [1.0; 3], pre_pivot: [0.0; 3] });
         }
     }
     out
@@ -157,7 +161,7 @@ mod tests {
     fn unit_prop() -> PropActor {
         PropActor {
             name: "t".into(),
-            mesh: StaticMesh {
+            mesh: Arc::new(StaticMesh {
                 name: "t".into(),
                 bounding_box: Default::default(),
                 bounding_sphere: [0.0; 4],
@@ -169,7 +173,7 @@ mod tests {
                 indices: Vec::new(),
                 materials: Vec::new(),
                 props: Default::default(),
-            },
+            }),
             slots: Vec::new(),
             visible: true,
             location: [10.0, 20.0, 30.0],

@@ -109,6 +109,28 @@ pub fn spawn_line(
     out
 }
 
+/// Cheap pool duplicate: shares the parsed mesh + animation (Arc), clones only
+/// the small per-slot state. The rig tables are rebuilt (O(bones), trivial).
+fn duplicate_actor(t: &SkelActor) -> SkelActor {
+    SkelActor {
+        name: t.name.clone(),
+        rig: SkinRig::new(Arc::clone(&t.rig.mesh), t.rig.anim.clone()),
+        seq: t.seq,
+        seq_name: t.seq_name.clone(),
+        location: t.location,
+        yaw: t.yaw,
+        pitch: t.pitch,
+        roll: t.roll,
+        idle_seq: t.idle_seq,
+        move_seq: t.move_seq,
+        attach_to: t.attach_to.clone(),
+        attach_pose: t.attach_pose,
+        view_shrink: t.view_shrink,
+        anim_time: t.anim_time,
+        slots: t.slots.clone(),
+    }
+}
+
 /// Replay pool: `count` hidden instances of each (package, mesh name).
 pub fn spawn_pool(
     lib: &mut AssetLibrary,
@@ -122,10 +144,12 @@ pub fn spawn_pool(
             eprintln!("[Replay] mesh {package}.{mesh} missing");
             continue;
         };
-        for _ in 0..*count {
-            if let Some(a) = build_actor(lib, pkg, i, &mut texture_for) {
-                out.push(a);
-            }
+        // Parse once: every slot shares the same mesh + animation (Arc).
+        let Some(first) = build_actor(lib, pkg, i, &mut texture_for) else { continue };
+        out.push(first);
+        for _ in 1..*count {
+            let d = duplicate_actor(out.last().unwrap());
+            out.push(d);
         }
     }
     out

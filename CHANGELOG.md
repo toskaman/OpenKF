@@ -2,6 +2,43 @@
 
 All notable changes to OpenKF. Dates are 2026.
 
+## v1.8.0 — Memory, browser details, benchmark automation (October 30)
+
+### Added
+- **Server browser v2** (`--browse`): live GameSpy details (hostname, map,
+  players) next to every favorite/recent, queried in parallel, plus a `lan`
+  command that discovers KF1 servers on the local network via broadcast.
+  KF1 servers answer `\status\` on `game + 10` (e.g. 7717) — the v1.7.0
+  "no usable query protocol" note was wrong for direct queries; only the
+  internet list still needs Steamworks (UDP masters verified dead: NXDOMAIN
+  DNS, no A2S, timed-out master IPs).
+- **`sound_sweep` example**: decodes every `Sound` export in a folder through
+  the exact live chain and reports ok/fail by reason.
+- **NETSPEED regression test**: scripted mock server drives
+  `HELLO -> CHALLENGE -> LOGIN -> USES/DLMGR/WELCOME -> file bytes -> JOIN`
+  and locks the retail-exact `NETSPEED 25000` handshake.
+
+### Changed
+- **RAM -64%**: packages are memory-mapped instead of read+leaked whole
+  (only touched pages resident), and pool actors share parsed meshes and
+  animations via `Arc` instead of re-parsing per slot (99 zed + 303 prop
+  slots). Live peak RSS 2244 MB -> 1084 MB, steady state ~660 MB.
+- **Exact-GUID lookup scans all candidates**: a stale same-named copy in the
+  retail cache no longer shadows the fresh download (it used to return
+  `None`, re-fetching 136 MB over the slow file channel every join).
+- Retail FPS is now automated (PresentMon 2.6.0), no longer manual `stat fps`.
+- `docs/BENCHMARKS.md`: new runs + a presented-FPS (PresentMon) section.
+
+### Verified
+- Custom sounds: 2839/2839 decode across all custom packages (0 failures);
+  live 160 sounds with 0 failures, plus a public modded-server join.
+- Rejoining the public modded server downloads nothing (all GUIDs cached).
+- Benchmarks (RTX 4060 Ti): solo 651 FPS / 0.39 s load / 835 MB; live
+  201 FPS at 162 actors / 1084 MB; retail 3.26 s load / 596 MB.
+- Presented FPS (PresentMon, 20 s, windowed): OpenKF 313 FPS avg in a loaded
+  live scene vs retail's 120 FPS engine-capped solo baseline.
+- Full workspace suite green; release build clean.
+
 ## v1.7.0 — Downloads, effects, browser, benchmarks (October 30)
 
 ### Added

@@ -23,6 +23,7 @@ bytemuck = { version = "1.19", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
 rayon = "1.10"
 png = "0.17"
+memmap2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 cpal = "0.15"

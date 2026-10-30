@@ -38,6 +38,26 @@ pub const EDF_SPECTATOR_NAME: u8 = 0x20;
 pub const EDF_KEYWORDS: u8 = 0x01;
 pub const EDF_GAME_ID: u8 = 0x04;
 
+/// GameSpy status request (the query protocol KF1 servers answer).
+pub const GAMESPY_STATUS_REQUEST: &[u8] = b"\\status\\";
+
+/// KF1 query-port offset: a game server on UDP `game` answers GameSpy
+/// status on `game + 10` (default 7707 -> 7717).
+pub const KF_QUERY_PORT_OFFSET: u16 = 10;
+
+/// Server details from a GameSpy `\status\` query.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GameSpyStatus {
+    pub hostname: String,
+    pub mapname: String,
+    pub maptitle: String,
+    pub gametype: String,
+    pub numplayers: u32,
+    pub maxplayers: u32,
+    pub gamever: String,
+    pub hostport: u16,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SteamQueryError {
     #[error("IO error: {0}")]
@@ -515,6 +535,101 @@ impl SteamServerQuery {
 
         Ok(results)
     }
+
+    /// Parses a GameSpy `\status\` reply (`\key\value\...`) into server details.
+    /// This is the query protocol KF1 dedicated servers actually answer (A2S
+    /// is not implemented by the retail server). Verified live against UCC.
+    pub fn parse_gamespy_status(packet: &[u8]) -> Result<GameSpyStatus, SteamQueryError> {
+        let text = String::from_utf8_lossy(packet);
+        let parts: Vec<&str> = text.split('\\').collect();
+        let mut st = GameSpyStatus::default();
+        let mut pairs = 0usize;
+        // Skip the leading empty segment (`\key\value...` starts with `\`).
+        let mut it = parts.into_iter().peekable();
+        if it.peek() == Some(&"") {
+            it.next();
+        }
+        while let (Some(k), Some(v)) = (it.next(), it.next()) {
+            if k.is_empty() {
+                continue;
+            }
+            pairs += 1;
+            match k {
+                "hostname" => st.hostname = v.to_string(),
+                "mapname" => st.mapname = v.to_string(),
+                "maptitle" => st.maptitle = v.to_string(),
+                "gametype" => st.gametype = v.to_string(),
+                "numplayers" => st.numplayers = v.parse().unwrap_or(0),
+                "maxplayers" => st.maxplayers = v.parse().unwrap_or(0),
+                "gamever" => st.gamever = v.to_string(),
+                "hostport" => st.hostport = v.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+        if pairs == 0 || (st.hostname.is_empty() && st.mapname.is_empty()) {
+            return Err(SteamQueryError::InvalidHeader {
+                expected: b"\\hostname\\...".to_vec(),
+                got: packet.iter().copied().take(32).collect(),
+            });
+        }
+        Ok(st)
+    }
+
+    /// Queries a KF1 server's GameSpy status. `game_addr` is the GAME port
+    /// (what clients connect to); the query goes to `game + 10`, falling back
+    /// to the given port itself (covers pasted query ports).
+    pub fn query_gamespy_status(&self, game_addr: SocketAddrV4) -> Result<GameSpyStatus, SteamQueryError> {
+        let socket = UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_read_timeout(Some(self.timeout))?;
+        socket.set_write_timeout(Some(self.timeout))?;
+        let mut buf = [0u8; 4096];
+        let targets = [
+            SocketAddrV4::new(*game_addr.ip(), game_addr.port().wrapping_add(KF_QUERY_PORT_OFFSET)),
+            game_addr,
+        ];
+        for t in targets {
+            let _ = socket.send_to(GAMESPY_STATUS_REQUEST, t);
+            match socket.recv_from(&mut buf) {
+                Ok((n, _)) => {
+                    if let Ok(st) = Self::parse_gamespy_status(&buf[..n]) {
+                        return Ok(st);
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        Err(SteamQueryError::Timeout(game_addr))
+    }
+
+    /// Discovers KF1 servers on the LAN: broadcasts `\status\` to `query_port`
+    /// and collects replies until `listen` elapses. Returns (game addr, status).
+    pub fn scan_lan(&self, query_port: u16, listen: Duration) -> Vec<(SocketAddrV4, GameSpyStatus)> {
+        let mut out = Vec::new();
+        let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else { return out };
+        if socket.set_broadcast(true).is_err() {
+            return out;
+        }
+        let _ = socket.set_read_timeout(Some(Duration::from_millis(250)));
+        let bcast = SocketAddrV4::new(Ipv4Addr::BROADCAST, query_port);
+        let _ = socket.send_to(GAMESPY_STATUS_REQUEST, bcast);
+        let deadline = Instant::now() + listen;
+        let mut buf = [0u8; 4096];
+        while Instant::now() < deadline {
+            match socket.recv_from(&mut buf) {
+                Ok((n, SocketAddr::V4(from))) => {
+                    if let Ok(st) = Self::parse_gamespy_status(&buf[..n]) {
+                        let game = SocketAddrV4::new(*from.ip(), from.port().saturating_sub(KF_QUERY_PORT_OFFSET));
+                        if !out.iter().any(|(a, _): &(SocketAddrV4, GameSpyStatus)| *a == game) {
+                            out.push((game, st));
+                        }
+                    }
+                }
+                _ => continue,
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
 }
 
 /// Helper function to read null-terminated C-style string
@@ -805,5 +920,66 @@ mod tests {
 
         master_handle.join().unwrap();
         game_handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_parse_gamespy_status_live_shape() {
+        // Shape captured live from UCC (`\status\` on the query port).
+        let packet = b"\\gamename\\redorchestra\\gamever\\3339\\minnetver\\3180\\location\\0\\hostname\\Killing Floor Server\\hostport\\7707\\maptitle\\KF-Labo Biotics\\mapname\\KF-BioticsLab\\gametype\\KFGameType\\numplayers\\2\\maxplayers\\6\\gamemode\\openplaying\\difficulty\\2\\";
+        let st = SteamServerQuery::parse_gamespy_status(packet).unwrap();
+        assert_eq!(st.hostname, "Killing Floor Server");
+        assert_eq!(st.mapname, "KF-BioticsLab");
+        assert_eq!(st.maptitle, "KF-Labo Biotics");
+        assert_eq!(st.gametype, "KFGameType");
+        assert_eq!(st.numplayers, 2);
+        assert_eq!(st.maxplayers, 6);
+        assert_eq!(st.gamever, "3339");
+        assert_eq!(st.hostport, 7707);
+    }
+
+    #[test]
+    fn test_parse_gamespy_status_rejects_garbage() {
+        assert!(SteamServerQuery::parse_gamespy_status(b"").is_err());
+        assert!(SteamServerQuery::parse_gamespy_status(b"\xff\xff\xff\xffT").is_err());
+        assert!(SteamServerQuery::parse_gamespy_status(b"\\foo\\bar\\").is_err());
+    }
+
+    #[test]
+    fn test_e2e_mock_gamespy_status_query() {
+        // Mock KF1 query port: answers `\status\` with a fixed reply.
+        let server_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = match server_socket.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            _ => unreachable!(),
+        };
+        let reply = b"\\gamename\\redorchestra\\hostname\\Mock Server\\mapname\\KF-WestLondon\\gametype\\KFGameType\\numplayers\\1\\maxplayers\\6\\gamever\\3339\\hostport\\7707\\".to_vec();
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            // May receive up to two probes (game+10 guess, then as-given fallback).
+            for _ in 0..2 {
+                let Ok((n, from)) = server_socket.recv_from(&mut buf) else { break };
+                if &buf[..n] == GAMESPY_STATUS_REQUEST {
+                    server_socket.send_to(&reply, from).unwrap();
+                    break;
+                }
+            }
+        });
+
+        // Query the mock's exact port: the game+10 guess times out fast, then
+        // the as-given fallback succeeds.
+        let query = SteamServerQuery::new().with_timeout(Duration::from_millis(300));
+        let st = query.query_gamespy_status(server_addr).expect("mock query should succeed");
+        assert_eq!(st.hostname, "Mock Server");
+        assert_eq!(st.mapname, "KF-WestLondon");
+        assert_eq!((st.numplayers, st.maxplayers), (1, 6));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_gamespy_status_timeout_is_error() {
+        // Nothing listens on this high loopback port: must time out, not hang.
+        let query = SteamServerQuery::new().with_timeout(Duration::from_millis(200));
+        let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 59999);
+        assert!(matches!(query.query_gamespy_status(addr), Err(SteamQueryError::Timeout(_))));
     }
 }

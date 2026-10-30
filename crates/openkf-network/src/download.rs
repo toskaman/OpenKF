@@ -119,27 +119,46 @@ pub fn retail_cache(kf_dir: &Path) -> &'static HashMap<String, PathBuf> {
 }
 
 /// Package for an exact `USES` GUID: retail cache first, then by name.
+///
+/// Every same-named candidate is tried in search order; the first whose GUID
+/// matches wins. A stale copy (e.g. an old version in the retail cache) must
+/// not shadow the fresh file — returning `None` here re-downloads it every
+/// join (verified live: stale `Cache/*.uxx` shadowed a fresh FastDL copy and
+/// the client re-fetched 136 MB over the slow file channel).
 pub fn find_package_by_guid(kf_dir: &Path, fname: &str, guid: &str) -> Option<PathBuf> {
     if let Some(p) = retail_cache_index(kf_dir).by_guid.get(&guid.to_ascii_uppercase()) {
         return Some(p.clone());
     }
-    let p = find_package_file(kf_dir, fname)?;
-    // A same-named file of another version is only acceptable from the game folders.
-    if package_guid(&p).is_some_and(|g| !g.eq_ignore_ascii_case(guid)) && !PACKAGE_DIRS.iter().any(|d| p.starts_with(kf_dir.join(d))) {
-        return None;
+    select_by_guid(find_package_files(kf_dir, fname), kf_dir, guid)
+}
+
+/// First candidate whose GUID matches (game-folder stock files are accepted
+/// even on version skew, retail behaviour). Split out so the stale-shadow
+/// rule is unit-testable without the global retail index.
+fn select_by_guid(paths: Vec<PathBuf>, kf_dir: &Path, guid: &str) -> Option<PathBuf> {
+    paths.into_iter().find(|p| {
+        PACKAGE_DIRS.iter().any(|d| p.starts_with(kf_dir.join(d))) || package_guid(p).is_some_and(|g| g.eq_ignore_ascii_case(guid))
+    })
+}
+
+/// All same-named package files in search order: game folders, retail
+/// download cache, then the OpenKF download folder.
+pub fn find_package_files(kf_dir: &Path, fname: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = PACKAGE_DIRS.iter().map(|d| kf_dir.join(d).join(fname)).filter(|p| p.is_file()).collect();
+    if let Some(p) = retail_cache(kf_dir).get(&fname.to_ascii_lowercase()).cloned() {
+        out.push(p);
     }
-    Some(p)
+    let dl = download_dir(kf_dir).join(fname);
+    if dl.is_file() {
+        out.push(dl);
+    }
+    out
 }
 
 /// Finds a package file (`KF-Foo.rom`, `Bar.utx`) in the game folders, the retail
 /// download cache, then the OpenKF download folder.
 pub fn find_package_file(kf_dir: &Path, fname: &str) -> Option<PathBuf> {
-    PACKAGE_DIRS
-        .iter()
-        .map(|d| kf_dir.join(d).join(fname))
-        .find(|p| p.is_file())
-        .or_else(|| retail_cache(kf_dir).get(&fname.to_ascii_lowercase()).cloned())
-        .or_else(|| Some(download_dir(kf_dir).join(fname)).filter(|p| p.is_file()))
+    find_package_files(kf_dir, fname).into_iter().next()
 }
 
 /// `PACKAGE_FILE_TAG` of UE2 packages.
@@ -398,6 +417,49 @@ mod fastdl_tests {
         assert_eq!(&b, &[0x33, 0x22, 0x11, 0x00, 0xDD, 0xCC, 0xBB, 0xAA, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xCD, 0xAB, 0x89]);
         assert_eq!(super::guid_to_bytes("ZZZ"), None);
         assert_eq!(super::guid_to_bytes("0011"), None);
+    }
+
+    /// Minimal package header: tag + 16 GUID bytes at offset 36.
+    fn pkg_bytes(guid: &str) -> Vec<u8> {
+        let mut h = vec![0u8; 52];
+        h[0..4].copy_from_slice(&PACKAGE_TAG.to_le_bytes());
+        h[36..52].copy_from_slice(&super::guid_to_bytes(guid).unwrap());
+        h
+    }
+
+    #[test]
+    fn stale_shadow_does_not_hide_fresh_download() {
+        // Live bug: a stale same-named copy earlier in the search order made
+        // the lookup return None, re-downloading 136 MB over the file channel.
+        let root = std::env::temp_dir().join(format!("openkf-guidsel-{}", std::process::id()));
+        let kf = root.join("kf");
+        let stale = root.join("cache").join("OLD-1.uxx");
+        let fresh = root.join("dl").join("Victim.u");
+        for p in [&stale, &fresh] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&stale, pkg_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).unwrap();
+        std::fs::write(&fresh, pkg_bytes("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")).unwrap();
+        let hit = super::select_by_guid(vec![stale, fresh.clone()], &kf, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        assert_eq!(hit, Some(fresh));
+        // No GUID match anywhere -> None (caller downloads).
+        let stale2 = root.join("cache").join("OLD2-1.uxx");
+        std::fs::write(&stale2, pkg_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).unwrap();
+        assert_eq!(super::select_by_guid(vec![stale2], &kf, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn game_folder_copy_accepted_despite_skew() {
+        // Retail leniency: stock files win even when the GUID differs.
+        let root = std::env::temp_dir().join(format!("openkf-guidgame-{}", std::process::id()));
+        let kf = root.join("kf");
+        let stock = kf.join("System").join("Victim.u");
+        std::fs::create_dir_all(stock.parent().unwrap()).unwrap();
+        std::fs::write(&stock, pkg_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).unwrap();
+        let hit = super::select_by_guid(vec![stock.clone()], &kf, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        assert_eq!(hit, Some(stock));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

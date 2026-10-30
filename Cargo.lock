@@ -1650,6 +1650,7 @@ dependencies = [
  "bytemuck",
  "cpal",
  "glam",
+ "memmap2",
  "openkf-audio",
  "openkf-network",
  "openkf-package",

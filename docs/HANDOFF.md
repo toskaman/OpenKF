@@ -1,3 +1,43 @@
+# Handoff (2026-10-30, night — v1.8.0 done)
+
+## Done this session (v1.8.0)
+
+- **RAM -64%**: packages memory-mapped (`AssetLibrary::load_file`, only
+  touched pages resident) + pool actors share parsed meshes/animations via
+  `Arc` (`zeds`/`props` `spawn_pool` parse once). Measured debug live:
+  steady 1828 MB -> 657 MB; release bench peaks: solo 835 MB, live 1084 MB.
+- **Server browser v2**: GameSpy `\status\` details for saved servers
+  (`openkf-network::browser`, mock-tested) + `lan` broadcast discovery in
+  `pick()`. Verified live against local UCC and a public server.
+- **GUID shadow fix**: `find_package_by_guid` scans every same-named
+  candidate instead of giving up on the first mismatch — a stale retail
+  `Cache/*.uxx` no longer forces a full channel re-download each join.
+  Regression tests (`select_by_guid`); verified by public-server rejoin
+  with zero downloads.
+- **NETSPEED experiment**: live A/B proved a `NETSPEED 100000` boost has no
+  effect (server throttle is per-tick); reverted to retail-exact 25000 with
+  a mock-server regression test.
+- **PresentMon benchmarks**: retail 120 FPS (engine cap) + OpenKF 313 FPS
+  presented, both 20 s windowed captures; `docs/BENCHMARKS.md` rewritten.
+- **Custom sounds closed out**: `sound_sweep` decodes all 2839 custom sounds
+  with 0 failures; the old ~25% failure report is resolved.
+- Public modded server (ZLOY): spectator join OK, custom map renders; note
+  the server ignores immediate re-HELLOs for a few minutes after a client
+  vanishes mid-download (server-side session state).
+
+## Suggested next steps (updated)
+
+1. Internet server list via Steamworks `ISteamMatchmakingServers` (or Steam
+   Web API `IGameServersService/GetServerList` + user key; needs a TLS
+   client first — the tree is plain-HTTP only today).
+2. RGameType-style custom gametypes: spawn/ready flow (the test bot gets no
+   pawn there; retail gametypes work).
+3. Articulated ragdolls (multi-body), projected decals, 3D browser UI.
+4. Uncapped-retail FPS ceiling (PresentMon wrote no rows for D3D9 in the
+   uncapped attempt; capped 120 stands as the reproducible baseline).
+
+---
+
 # Handoff (2026-10-30, evening — v1.7.0 done)
 
 ## Done this session
@@ -41,4 +81,5 @@
   between runs (thermals move FPS up to 2x).
 - Retail load marker: `Bringing Level <Map>.myLevel up for play ... appSeconds:`.
 - Old UDP masters (`hl2master.steampowered.com`, GameSpy) are NXDOMAIN/dead;
-  KF1 dedicated servers answer neither A2S nor GameSpy usefully.
+  KF1 answers no A2S. Correction (v1.8.0): KF1 dedicated servers DO answer
+  GameSpy `\status\` on `game + 10` — only the internet list is missing.

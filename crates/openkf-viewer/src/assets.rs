@@ -80,17 +80,18 @@ impl AssetLibrary {
         Self { kf_dir: kf_dir.into(), packages: HashMap::new() }
     }
 
-    /// Registers an already-loaded package (e.g. the map itself) under a name.
-    pub fn insert_bytes(&mut self, name: &str, bytes: Vec<u8>) -> Option<&'static Pkg> {
-        let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-        let pkg = UnrealPackage::from_bytes(bytes).ok().map(|p| &*Box::leak(Box::new(p)));
+    /// Memory-maps a package file and parses its tables. Only touched pages
+    /// become resident; a full `fs::read` would fault the whole file into RAM
+    /// (gigabytes across a map's packages) for the whole process lifetime.
+    pub fn load_file(&mut self, name: &str, path: &Path) -> Option<&'static Pkg> {
+        let file = std::fs::File::open(path).ok()?;
+        // SAFETY: retail package files are never modified while the viewer runs
+        // (same assumption as `MmapPackage::open`); the mapping is read-only and
+        // only the leaked handle (not the pages) stays resident unconditionally.
+        let mmap: &'static memmap2::Mmap = Box::leak(Box::new(unsafe { memmap2::Mmap::map(&file).ok()? }));
+        let pkg = UnrealPackage::from_bytes(&mmap[..]).ok().map(|p| &*Box::leak(Box::new(p)));
         self.packages.insert(name.to_ascii_lowercase(), pkg);
         pkg
-    }
-
-    pub fn load_file(&mut self, name: &str, path: &Path) -> Option<&'static Pkg> {
-        let bytes = std::fs::read(path).ok()?;
-        self.insert_bytes(name, bytes)
     }
 
     /// Finds and opens a package by name in the standard KF folders.
