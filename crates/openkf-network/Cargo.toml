@@ -8,6 +8,7 @@ description = "Retail Unreal Engine 2.5 multiplayer network protocol client and 
 
 [dependencies]
 md-5 = "0.10"
+flate2 = "1.1"
 openkf-package = { path = "../openkf-package" }
 glam = "0.29"
 bytemuck = { version = "1.19", features = ["derive"] }

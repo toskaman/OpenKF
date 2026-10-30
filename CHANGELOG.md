@@ -19,6 +19,9 @@ All notable changes to OpenKF. Dates are 2026.
 - `OPENKF_LIST_SEQS=1` debug output listing every animation sequence of loaded meshes.
 - Prop visibility counters in the live status line.
 
+- **FastDL**: missing server packages are downloaded from the HTTP redirect before the level loads (`.uz2` decompression, GUID check), stored in `%LOCALAPPDATA%\OpenKF\Downloads`.
+- `fastdl` example tool.
+
 ### Changed
 - Weapons held by pawns sample their owner's current one-shot animation time.
 - HUD and on-screen controls are in English.

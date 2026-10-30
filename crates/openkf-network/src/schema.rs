@@ -62,7 +62,6 @@ impl ClassNet {
     }
 }
 
-const DIRS: &[&str] = &["System", "Maps", "Textures", "Sounds", "StaticMeshes", "Animations", "Music", "KarmaData"];
 
 pub struct GameSchema {
     pub map: PackageMap,
@@ -78,7 +77,7 @@ impl GameSchema {
         let mut pkgs = Vec::new();
         let mut infos = Vec::new();
         for u in &uses {
-            let path: Option<PathBuf> = DIRS.iter().map(|d| kf_dir.join(d).join(&u.fname)).find(|p| p.exists());
+            let path: Option<PathBuf> = crate::download::find_package_file(kf_dir, &u.fname);
             let m = path.and_then(|p| MmapPackage::open(p).ok());
             infos.push(m.as_ref().map(|m| {
                 let p = m.as_package();

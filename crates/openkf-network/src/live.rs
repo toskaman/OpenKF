@@ -441,6 +441,41 @@ impl LiveClient {
         }
     }
 
+    /// Downloads every `USES` package missing locally from the server's FastDL redirect
+    /// (like the retail `UPendingLevel` before joining). Files go to `download_dir`, never
+    /// into the game installation. Packages that cannot be fetched stay unresolved.
+    fn fetch_missing_packages(&mut self) {
+        let missing: Vec<(String, String)> = self
+            .uses
+            .iter()
+            .filter(|u| !u.fname.is_empty())
+            .filter(|u| match crate::download::find_package_file(&self.kf_dir, &u.fname) {
+                None => true,
+                // Same name, other version (e.g. a different server's build of a custom map).
+                Some(p) => p.starts_with(crate::download::download_dir(&self.kf_dir)) && crate::download::package_guid(&p).is_some_and(|g| !g.eq_ignore_ascii_case(&u.guid)),
+            })
+            .map(|u| (u.fname.clone(), u.guid.clone()))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let Some((base, compressed)) = self.download.as_ref().and_then(|d| d.redirect_url.clone().map(|u| (u, d.compressed))) else {
+            self.log.push(format!("download: {} package(s) missing and no HTTP redirect offered: {:?}", missing.len(), missing.iter().map(|m| &m.0).collect::<Vec<_>>()));
+            return;
+        };
+        let dir = crate::download::download_dir(&self.kf_dir);
+        for (fname, guid) in missing {
+            let t = std::time::Instant::now();
+            match crate::download::fetch_package(&base, compressed, &fname, Some(&guid), &dir) {
+                Ok(p) => {
+                    let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                    self.log.push(format!("download: {fname} {} KB in {:.1} s", size / 1024, t.elapsed().as_secs_f32()));
+                }
+                Err(e) => self.log.push(format!("download: {fname} failed: {e}")),
+            }
+        }
+    }
+
     fn dispatch(&mut self, b: Bunch, events: &mut Vec<SessionEvent>) {
         if b.ch_index == 0 {
             if b.reliable {
@@ -594,6 +629,7 @@ impl LiveClient {
             "WELCOME" => {
                 self.map = param(m, "LEVEL").map(str::to_string);
                 self.state = LiveState::LoggedIn;
+                self.fetch_missing_packages();
                 let schema = GameSchema::load(&self.kf_dir, std::mem::take(&mut self.uses));
                 self.log.push(format!("schema: {} objects, {} names", schema.map.max_object_index, schema.names.len()));
                 let mut session = ActorSession::new(schema);
@@ -616,10 +652,21 @@ impl LiveClient {
                 self.state = LiveState::Joined;
             }
             "DLMGR" => {
-                // Server requests ChannelDownload: arm DownloadManager for FastDL
-                let dm = crate::download::DownloadManager::new(&self.kf_dir);
-                self.download = Some(dm);
-                self.log.push("dlmgr: ChannelDownload enabled".into());
+                // Download managers offered by the server, in preference order:
+                // IpDrv.HTTPDownload (FastDL redirect) and/or Engine.ChannelDownload.
+                let dm = self.download.get_or_insert_with(|| crate::download::DownloadManager::new(&self.kf_dir));
+                let class = param(m, "CLASS").unwrap_or("");
+                if class.eq_ignore_ascii_case("IpDrv.HTTPDownload") {
+                    if let Some(url) = param(m, "PARAMS").filter(|u| u.starts_with("http://")) {
+                        if dm.redirect_url.is_none() {
+                            dm.redirect_url = Some(url.to_string());
+                            dm.compressed = param(m, "COMPRESSION") == Some("1");
+                            self.log.push(format!("dlmgr: HTTP redirect {url} (uz2 {})", dm.compressed));
+                        }
+                    }
+                } else {
+                    self.log.push(format!("dlmgr: {class} offered"));
+                }
             }
             "NEEDED" => {
                 // Server indicates a needed package: register expected file

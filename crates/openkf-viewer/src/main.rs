@@ -111,8 +111,9 @@ fn resolve_map(mut a: Args, replay_map: Option<&str>) -> Args {
     }
     // Accept a bare map name: KF-WestLondon
     if !a.map.exists() {
-        let p = a.kf.join("Maps").join(&a.map).with_extension("rom");
-        if p.exists() {
+        let fname = a.map.with_extension("rom");
+        let fname = fname.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        if let Some(p) = openkf_network::download::find_package_file(&a.kf, &fname) {
             a.map = p;
         }
     }
@@ -151,6 +152,13 @@ fn place_view_weapon(a: &mut zeds::SkelActor, me: [f32; 3], yaw: f32, pitch: f32
     // Drawn with DisplayFOV instead of the 90-degree view FOV: lateral magnification.
     let lat = 1.0 / (display_fov.to_radians() * 0.5).tan();
     a.view_shrink = Some(zeds::ViewShrink { eye, fwd, k: 0.2, lat });
+}
+
+/// The map could not be opened (not installed and not downloadable): clean exit.
+fn fatal_map(map: &std::path::Path, e: &str) -> ! {
+    eprintln!("[Scene] cannot load map {}: {e}", map.display());
+    eprintln!("[Scene] the map is neither installed nor downloadable from the server (FastDL)");
+    std::process::exit(2);
 }
 
 fn initial_camera(scene: &scene::Scene, args: &Args) -> Camera {
@@ -200,7 +208,7 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
     let (device, queue) = device_for(&adapter);
     let bc = device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
     let t = Instant::now();
-    let mut scene = scene::load_scene(&args.kf, &args.map, bc, args.zeds, rp.map(|r| r.pool.as_slice()).or(live.map(|_| live_pool.as_slice()))).expect("load map");
+    let mut scene = scene::load_scene(&args.kf, &args.map, bc, args.zeds, rp.map(|r| r.pool.as_slice()).or(live.map(|_| live_pool.as_slice()))).unwrap_or_else(|e| fatal_map(&args.map, &e));
     println!("[Scene] {}", scene.stats);
     let mut cam_override = None;
     if let Some(rp) = rp {
@@ -469,7 +477,7 @@ impl ApplicationHandler for App {
         let (device, queue) = device_for(&adapter);
         let bc = device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
         let t = Instant::now();
-        let scene = scene::load_scene(&self.args.kf, &self.args.map, bc, self.args.zeds, self.replay.as_ref().map(|r| r.pool.as_slice()).or(self.live.as_ref().map(|_| self.live_pool.as_slice()))).expect("load map");
+        let scene = scene::load_scene(&self.args.kf, &self.args.map, bc, self.args.zeds, self.replay.as_ref().map(|r| r.pool.as_slice()).or(self.live.as_ref().map(|_| self.live_pool.as_slice()))).unwrap_or_else(|e| fatal_map(&self.args.map, &e));
         println!("[Scene] {}", scene.stats);
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
@@ -657,7 +665,7 @@ impl ApplicationHandler for App {
                 let new_map = self.live.as_ref().and_then(|sh| sh.lock().unwrap().map.clone());
                 if let Some(m) = new_map {
                     if !m.eq_ignore_ascii_case(&self.title) {
-                        let rom = self.args.kf.join("Maps").join(&m).with_extension("rom");
+                        let rom = openkf_network::download::find_package_file(&self.args.kf, &format!("{m}.rom")).unwrap_or_else(|| self.args.kf.join("Maps").join(&m).with_extension("rom"));
                         println!("[Live] map change {} -> {m}, reloading", self.title);
                         let bc = g.device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
                         match scene::load_scene(&self.args.kf, &rom, bc, self.args.zeds, Some(self.live_pool.as_slice())) {
@@ -833,8 +841,10 @@ fn main() {
                     break;
                 }
             }
-            if t.elapsed() > Duration::from_secs(20) {
-                eprintln!("[Live] no WELCOME from server after 20 s");
+            // Generous: the server may be changing maps, and missing packages are
+            // downloaded (FastDL) before the level is announced to the renderer.
+            if t.elapsed() > Duration::from_secs(180) {
+                eprintln!("[Live] no WELCOME from server after 180 s");
                 std::process::exit(1);
             }
             std::thread::sleep(Duration::from_millis(20));

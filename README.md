@@ -90,7 +90,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history.
 | HUD and crosshair | ✅ |
 | 3D sound from `ClientHearSound`, SoundGroups, local weapon sounds | ✅ |
 | Server travel and automatic reconnect | ✅ |
-| FastDL / UFileChannel download manager (256 MB per-file cap) | ✅ |
+| FastDL: HTTP redirect download of missing packages, `.uz2` decompression | ✅ new |
 | Particle emitters, decals, projectors | ⏳ planned |
 | True ragdoll physics | ⏳ fall-over fallback for now |
 | In-viewer server browser | ⏳ master-server code exists in `openkf-app`, not wired to the viewer yet |

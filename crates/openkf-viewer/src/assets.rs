@@ -105,6 +105,14 @@ impl AssetLibrary {
                 return self.load_file(name, &p);
             }
         }
+        // Packages downloaded from servers (FastDL), any extension.
+        let dl = openkf_network::download::download_dir(&self.kf_dir);
+        for ext in ["utx", "usx", "rom", "u", "ukx", "uax"] {
+            let p = dl.join(format!("{name}.{ext}"));
+            if p.is_file() {
+                return self.load_file(name, &p);
+            }
+        }
         self.packages.insert(key, None);
         None
     }
