@@ -1,3 +1,23 @@
+# Handoff (2026-10-30, night — v1.10.0 in progress)
+
+## Texture fix (white floors): root cause + fix
+
+- Symptom: near street in WestLondon rendered white (sky showing through);
+  also black patches. Textures were fine (0/2302 BSP polys missing).
+- Diagnosis path: albedo-only render still white -> UV-grid viz ->
+  no-sky render proved a real hole -> `--pick` raycast found the street
+  batch behind a transparent `voidtex` plane -> no-cull render showed the
+  street -> front-cull isolated winding. The fan triangulation assumed one
+  vertex order; order varies per node, and some fans start with degenerate
+  tris that fool a single-triangle test.
+- Fix (`scene.rs`): per-node fan winding aligned with the surf normal via
+  Newell's method over the whole polygon. Screenshots refreshed.
+- Note: section stored diffuse UVs are NOT texel-scale (0..1-ish, some
+  garbage) — keep using the surf-vector `texel_uv` recompute. Documented
+  in code.
+
+---
+
 # Handoff (2026-10-30, late night — v1.9.0 done)
 
 ## Done this session (v1.9.0)

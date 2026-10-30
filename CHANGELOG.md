@@ -2,6 +2,23 @@
 
 All notable changes to OpenKF. Dates are 2026.
 
+## Unreleased (toward v1.10.0)
+
+### Fixed
+- **BSP floors/walls no longer vanish**: section vertex order varies per
+  node (additive vs subtractive brushes) and some fans start with
+  degenerate triangles, so whole streets were backface-culled and the sky
+  showed through (the "white floor" reports). Fan winding is now aligned
+  per node with the surf normal using Newell's method. Verified on
+  KF-WestLondon, KF-Manor and KF-Offices; screenshots refreshed.
+
+### Added
+- `--pick px,py` diagnostic: raycasts through a screen pixel and prints
+  the batch stack (blend, texture, lightmap, UVs). Used to find the
+  culled street batches.
+- More `OPENKF_DEBUG` scene diagnostics (node paths, texture index table,
+  non-opaque surfs, translucent mesh sections, floor winding).
+
 ## v1.9.0 — Articulated ragdolls, decals, in-game browser, internet list (October 30)
 
 ### Added

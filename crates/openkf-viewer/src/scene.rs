@@ -161,6 +161,9 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
         }
         let (tw, th) = tex.map(|t| tt.sizes[t]).unwrap_or((256, 256));
         // Positions + lightmap UVs from the render section when available.
+        // NOTE: the section's stored diffuse `uv` is NOT texel-scale (0..1-ish
+        // on most nodes, garbage-scale on others), so diffuse UVs always come
+        // from the surf-vector recompute below.
         let mut lm_index = -1;
         let verts: Vec<([f32; 3], [f32; 2])> = match model.sections.get(n.i_section.max(0) as usize).filter(|_| use_sections && n.i_section >= 0) {
             Some(sec) if (n.i_first_vertex.max(0) as usize + n.num_vertices as usize) <= sec.vertices.len() => {
@@ -197,8 +200,37 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
             let uv = model.texel_uv(s, p);
             e.0.push(Vertex { pos: conv(p), nrm: normal, uv: [uv[0] / tw as f32, uv[1] / th as f32], light, lm_uv: lm });
         }
+        // Section vertex order varies per node (additive vs subtractive brushes),
+        // so align the fan winding with the SURF normal (the node's split
+        // plane may point either way); otherwise whole floors are
+        // backface-culled and the sky shows through.
+        let facing = model.vectors.get(s.v_normal as usize).map(|v| conv(*v)).unwrap_or(normal);
+        // Newell's method over the whole polygon: robust even when the first
+        // fan triangle is degenerate (repeated/collinear verts), which a
+        // single-triangle test misreads (leaving floors culled).
+        let flip = if verts.len() >= 3 {
+            let mut n = [0.0f32; 3];
+            for i in 0..verts.len() {
+                let a = conv(verts[i].0);
+                let b = conv(verts[(i + 1) % verts.len()].0);
+                n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+                n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+                n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+            }
+            n[0] * facing[0] + n[1] * facing[1] + n[2] * facing[2] < 0.0
+        } else {
+            false
+        };
+        if std::env::var_os("OPENKF_DEBUG").is_some() && normal[1] > 0.9 {
+            eprintln!("[debug] floor node: surf_n=[{:.2},{:.2},{:.2}] flip={flip} mat={}",
+                facing[0], facing[1], facing[2], map.format_full_name(s.material));
+        }
         for i in 1..verts.len() as u32 - 1 {
-            e.1.extend_from_slice(&[base, base + i, base + i + 1]);
+            if flip {
+                e.1.extend_from_slice(&[base, base + i + 1, base + i]);
+            } else {
+                e.1.extend_from_slice(&[base, base + i, base + i + 1]);
+            }
         }
     }
 
@@ -310,10 +342,40 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
 
     let t_resolve = t0.elapsed();
     if std::env::var_os("OPENKF_DEBUG").is_some() {
+        // Which node path feeds the renderer, and is the recompute degenerate?
+        let (mut sec_ok, mut fallback) = (0usize, 0usize);
+        let mut degen_mats: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for n in &model.nodes {
+            if n.num_vertices < 3 || n.i_surf < 0 { continue; }
+            let on_sec = use_sections && n.i_section >= 0 && model.sections.get(n.i_section as usize).map_or(false, |s| (n.i_first_vertex.max(0) as usize + n.num_vertices as usize) <= s.vertices.len());
+            if on_sec { sec_ok += 1; continue; }
+            fallback += 1;
+            let su = &model.surfs[n.i_surf as usize];
+            let st = n.i_vert_pool.max(0) as usize;
+            if let Some(vs) = model.verts.get(st..st + n.num_vertices as usize) {
+                let uvs: Vec<[f32; 2]> = vs.iter().filter_map(|v| model.points.get(v.p_vertex as usize).map(|&p| model.texel_uv(su, p))).collect();
+                let spread = uvs.iter().fold(0.0f32, |a, u| a.max((u[0] - uvs[0][0]).abs()).max((u[1] - uvs[0][1]).abs()));
+                if uvs.len() >= 3 && spread < 0.5 {
+                    *degen_mats.entry(map.format_full_name(su.material)).or_default() += 1;
+                }
+            }
+        }
+        eprintln!("[debug] nodes: section-path {sec_ok}, fallback-path {fallback}");
+        for (i, r) in tt.refs.iter().enumerate() {
+            eprintln!("[debug] tex[{i}] = {}", r.pkg().format_full_name(r.export as i32 + 1));
+        }
+        let mut dm: Vec<_> = degen_mats.into_iter().collect();
+        dm.sort_by_key(|a| std::cmp::Reverse(a.1));
+        for (m, c) in dm.iter().take(10) { eprintln!("[debug] degenerate-uv fallback nodes: {c}x {m}"); }
         let bsp_none = polys.iter().filter(|p| surf_tex[p.surf].is_none()).count();
         let mut blends: HashMap<String, usize> = HashMap::new();
         for t in surf_tex.iter().flatten() { *blends.entry(format!("{:?}", t.1)).or_default() += 1; }
         eprintln!("[debug] BSP surf blends: {blends:?}");
+        for (i, s) in model.surfs.iter().enumerate() {
+            if matches!(surf_tex[i].map(|t| t.1), Some(b) if b != crate::assets::Blend::Opaque) {
+                eprintln!("[debug] non-opaque surf {i}: {} -> {:?} flags {:08x}", map.format_full_name(s.material), surf_tex[i].map(|t| t.1), s.poly_flags);
+            }
+        }
         eprintln!("[debug] BSP polys without texture: {bsp_none}/{}", polys.len());
         let mut none_flags: HashMap<u32, usize> = HashMap::new();
         for p in &polys { if surf_tex[p.surf].is_none() { *none_flags.entry(model.surfs[p.surf].poly_flags).or_default() += 1; } }
@@ -336,12 +398,21 @@ pub fn load_scene(kf_dir: &Path, rom: &Path, bc_supported: bool, zeds: bool, poo
                     if tn.to_ascii_lowercase().contains("fire") || tn.to_ascii_lowercase().contains("glow") || tn.to_ascii_lowercase().contains("smoke") || tn.to_ascii_lowercase().contains("fx") {
                         eprintln!("[debug] mesh {} sec {si}: {mat} -> {tn} {b:?}", me.mesh.name);
                     }
+                    if !matches!(b, crate::assets::Blend::Opaque) {
+                        eprintln!("[debug] translucent mesh {} sec {si}: {mat} -> {tn} {b:?}", me.mesh.name);
+                    }
                 }
             }
         }
         for me in &meshes {
             let n = me.section_tex.iter().filter(|t| t.is_none()).count();
             if n > 0 { eprintln!("[debug] mesh {} : {n}/{} sections untextured, {} materials", me.mesh.name, me.section_tex.len(), me.mesh.materials.len()); }
+            let chans = me.mesh.uv_channels.len();
+            let short = me.mesh.uv_channels.first().map_or(true, |u| u.len() < me.mesh.positions.len());
+            if chans == 0 || short {
+                let placements = work.iter().filter(|(mi, _, _)| meshes[*mi].mesh.name == me.mesh.name).count();
+                eprintln!("[debug] mesh {} : uv_channels={chans} short={short} verts={} placements={placements}", me.mesh.name, me.mesh.positions.len());
+            }
         }
     }
 

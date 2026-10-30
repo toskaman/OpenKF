@@ -57,6 +57,7 @@ struct Args {
     play: bool,
     browse: bool,
     bench: usize,
+    pick: Option<(u32, u32)>,
 }
 
 fn parse_args() -> Args {
@@ -78,6 +79,7 @@ fn parse_args() -> Args {
         play: false,
         browse: false,
         bench: 0,
+        pick: None,
     };
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -97,6 +99,11 @@ fn parse_args() -> Args {
             "--connect" => a.connect = Some(it.next().expect("--connect host:port")),
             "--browse" => a.browse = true,
             "--bench" => a.bench = it.next().expect("--bench <frames>").parse().unwrap(),
+            "--pick" => {
+                let s = it.next().expect("--pick <px,py>");
+                let (x, y) = s.split_once(',').expect("px,py");
+                a.pick = Some((x.parse().unwrap(), y.parse().unwrap()));
+            }
             "--auth" => a.auth = PathBuf::from(it.next().expect("--auth <capture>")),
             "--name" => a.name = it.next().expect("--name <player>"),
             "--no-ready" => a.ready = false,
@@ -207,6 +214,57 @@ fn device_for(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue) {
 }
 
 // ------------------------------------------------------------------ headless
+/// Diagnostic: raycast from the camera through screen pixel (px,py) and print
+/// the nearest batch (index, blend, lightmap, uv, position). `--pick px,py`.
+fn pick_pixel(scene: &scene::Scene, cam: &Camera, w: u32, h: u32, px: u32, py: u32) {
+    let aspect = w as f32 / h.max(1) as f32;
+    let inv = cam.view_proj(aspect).inverse();
+    let ndc = glam::Vec4::new(px as f32 / w as f32 * 2.0 - 1.0, 1.0 - py as f32 / h as f32 * 2.0, 0.0, 1.0);
+    let near = inv * ndc;
+    let ro = cam.pos;
+    let rd = (glam::Vec3::new(near.x, near.y, near.z) / near.w - ro).normalize();
+    let mut hits: Vec<(f32, usize, [f32; 2], [f32; 2], [f32; 3])> = Vec::new();
+    for (bi, b) in scene.batches.iter().enumerate() {
+        for tri in b.indices.chunks_exact(3) {
+            let p = |i: u32| glam::Vec3::from(b.vertices[i as usize].pos);
+            let (v0, v1, v2) = (p(tri[0]), p(tri[1]), p(tri[2]));
+            let e1 = v1 - v0;
+            let e2 = v2 - v0;
+            let pv = rd.cross(e2);
+            let det = e1.dot(pv);
+            if det.abs() < 1e-12 { continue; }
+            let inv_det = 1.0 / det;
+            let tv = ro - v0;
+            let u = tv.dot(pv) * inv_det;
+            if !(0.0..=1.0).contains(&u) { continue; }
+            let qv = tv.cross(e1);
+            let v = rd.dot(qv) * inv_det;
+            if !(0.0..=1.0).contains(&v) || u + v > 1.0 { continue; }
+            let t = e2.dot(qv) * inv_det;
+            if t < 0.0 { continue; }
+            let w0 = 1.0 - u - v;
+            let a = &b.vertices[tri[0] as usize];
+            let bb = &b.vertices[tri[1] as usize];
+            let c = &b.vertices[tri[2] as usize];
+            let uv = [w0 * a.uv[0] + u * bb.uv[0] + v * c.uv[0], w0 * a.uv[1] + u * bb.uv[1] + v * c.uv[1]];
+            let lm = [w0 * a.lm_uv[0] + u * bb.lm_uv[0] + v * c.lm_uv[0], w0 * a.lm_uv[1] + u * bb.lm_uv[1] + v * c.lm_uv[1]];
+            let hit = (ro + rd * t).to_array();
+            if !hits.iter().any(|(ht, hbi, _, _, _)| *hbi == bi && (*ht - t).abs() < 1.0) {
+                hits.push((t, bi, uv, lm, hit));
+            }
+        }
+    }
+    hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+    hits.truncate(6);
+    if hits.is_empty() {
+        println!("[Pick] ({px},{py}) no hit");
+    }
+    for (t, bi, uv, lm, hit) in hits {
+        let b = &scene.batches[bi];
+        println!("[Pick] ({px},{py}) batch {bi} blend={:?} tex={:?} lightmap={} t={t:.0} uv=[{:.2},{:.2}] lm=[{:.3},{:.3}] at [{:.0},{:.0},{:.0}] tris={}",
+            b.blend, b.texture, b.lightmap, uv[0], uv[1], lm[0], lm[1], hit[0], hit[1], hit[2], b.indices.len() / 3);
+    }
+}
 fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync::Arc<std::sync::Mutex<live_view::Shared>>>, live_pool: Vec<(String, String, usize)>) {
     let inst = instance();
     let adapter = pollster::block_on(inst.request_adapter(&wgpu::RequestAdapterOptions {
@@ -377,6 +435,9 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
     });
     let view = target.create_view(&Default::default());
     let cam = cam_override.unwrap_or_else(|| initial_camera(&scene, args));
+    if let Some((px, py)) = args.pick {
+        pick_pixel(&scene, &cam, w, h, px, py);
+    }
     let t = Instant::now();
     let verts = zeds::skin_all(&mut scene.actors, args.time);
     let skin_ms = t.elapsed().as_secs_f64() * 1e3;
