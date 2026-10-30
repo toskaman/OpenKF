@@ -105,6 +105,12 @@ impl AssetLibrary {
                 return self.load_file(name, &p);
             }
         }
+        // Retail download cache (Cache.ini), then packages downloaded by OpenKF.
+        for ext in ["utx", "usx", "rom", "u", "ukx", "uax"] {
+            if let Some(p) = openkf_network::download::retail_cache(&self.kf_dir).get(&format!("{name}.{ext}").to_ascii_lowercase()).cloned() {
+                return self.load_file(name, &p);
+            }
+        }
         // Packages downloaded from servers (FastDL), any extension.
         let dl = openkf_network::download::download_dir(&self.kf_dir);
         for ext in ["utx", "usx", "rom", "u", "ukx", "uax"] {

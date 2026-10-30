@@ -27,3 +27,8 @@
 - Control messages now match retail: `AUTH ... USERNAME= PASSWORD=`, `NETSPEED 25000`, `?VAC=1` in the LOGIN URL. Challenge response and GMD5 verified identical to retail.
 - Server still silent after LOGIN for OpenKF only. Remaining differences are below the control layer (packet acks / timing; retail sends the Steam blob ~1.7 s after STEAMENCRYPTIONKEY) or Steam-side session state.
 - Next: capture OpenKF through the same relay and diff packet by packet against the retail capture.
+
+## Root cause found: the server was never silent
+- A capture of OpenKF through `openkf-netcap` showed the server sends DLMGR + WELCOME right after LOGIN. OpenKF was busy downloading the server's ~1-2 GB of custom packages (FastDL) inside the WELCOME handler, so the viewer's 180 s join timeout fired first.
+- Fixes: retail download cache (`<KF>/Cache/Cache.ini`, `<GUID>.uxx`) is searched before downloading; download progress printed live; join wait raised to 900 s. Downloads persist in `%LOCALAPPDATA%\OpenKF\Downloads`, so later joins are fast.
+- TODO: download in a background thread while keeping the connection alive (retail behaviour), and show progress in the HUD.

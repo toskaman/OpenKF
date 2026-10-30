@@ -843,8 +843,8 @@ fn main() {
             }
             // Generous: the server may be changing maps, and missing packages are
             // downloaded (FastDL) before the level is announced to the renderer.
-            if t.elapsed() > Duration::from_secs(180) {
-                eprintln!("[Live] no WELCOME from server after 180 s");
+            if t.elapsed() > Duration::from_secs(900) {
+                eprintln!("[Live] no WELCOME from server after 900 s");
                 std::process::exit(1);
             }
             std::thread::sleep(Duration::from_millis(20));

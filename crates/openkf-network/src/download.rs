@@ -85,13 +85,36 @@ pub fn download_dir(kf_dir: &Path) -> PathBuf {
 /// Standard KF package folders.
 pub const PACKAGE_DIRS: &[&str] = &["System", "Maps", "Textures", "Sounds", "StaticMeshes", "Animations", "Music", "KarmaData"];
 
-/// Finds a package file (`KF-Foo.rom`, `Bar.utx`) in the game folders, then in the download folder.
+/// Retail download cache: `<kf>/Cache/Cache.ini` maps `GUID=FileName.ext`, files are
+/// stored as `<kf>/Cache/<GUID>.uxx`. Returns lower-cased file name -> cached path.
+pub fn retail_cache(kf_dir: &Path) -> &'static HashMap<String, PathBuf> {
+    static CACHE: std::sync::OnceLock<HashMap<String, PathBuf>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let dir = kf_dir.join("Cache");
+        let mut m = HashMap::new();
+        if let Ok(text) = std::fs::read(dir.join("Cache.ini")) {
+            for line in String::from_utf8_lossy(&text).lines() {
+                if let Some((guid, name)) = line.trim().split_once('=') {
+                    let p = dir.join(format!("{}.uxx", guid.trim()));
+                    if guid.trim().len() == 32 && p.is_file() {
+                        m.insert(name.trim().to_ascii_lowercase(), p);
+                    }
+                }
+            }
+        }
+        m
+    })
+}
+
+/// Finds a package file (`KF-Foo.rom`, `Bar.utx`) in the game folders, the retail
+/// download cache, then the OpenKF download folder.
 pub fn find_package_file(kf_dir: &Path, fname: &str) -> Option<PathBuf> {
     PACKAGE_DIRS
         .iter()
         .map(|d| kf_dir.join(d).join(fname))
-        .chain(std::iter::once(download_dir(kf_dir).join(fname)))
         .find(|p| p.is_file())
+        .or_else(|| retail_cache(kf_dir).get(&fname.to_ascii_lowercase()).cloned())
+        .or_else(|| Some(download_dir(kf_dir).join(fname)).filter(|p| p.is_file()))
 }
 
 /// `PACKAGE_FILE_TAG` of UE2 packages.

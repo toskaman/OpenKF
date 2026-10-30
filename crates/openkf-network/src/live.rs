@@ -469,9 +469,10 @@ impl LiveClient {
             match crate::download::fetch_package(&base, compressed, &fname, Some(&guid), &dir) {
                 Ok(p) => {
                     let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                    self.log.push(format!("download: {fname} {} KB in {:.1} s", size / 1024, t.elapsed().as_secs_f32()));
+                    // Printed immediately: downloads block the network thread.
+                    println!("[Download] {fname} {} KB in {:.1} s", size / 1024, t.elapsed().as_secs_f32());
                 }
-                Err(e) => self.log.push(format!("download: {fname} failed: {e}")),
+                Err(e) => println!("[Download] {fname} failed: {e}"),
             }
         }
     }
