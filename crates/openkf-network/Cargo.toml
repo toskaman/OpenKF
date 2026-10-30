@@ -1,0 +1,17 @@
+[package]
+name = "openkf-network"
+version = "0.1.0"
+edition = "2021"
+authors = ["OpenKF Project"]
+license = "GPL-3.0-or-later"
+description = "Retail Unreal Engine 2.5 multiplayer network protocol client and replication engine"
+
+[dependencies]
+md-5 = "0.10"
+openkf-package = { path = "../openkf-package" }
+glam = "0.29"
+bytemuck = { version = "1.19", features = ["derive"] }
+thiserror = "2.0"
+bitflags = "2.6"
+
+[dev-dependencies]

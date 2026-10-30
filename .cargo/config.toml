@@ -1,0 +1,6 @@
+[build]
+# 2026 ultra-optimized: native CPU tuning for 2026 hardware
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=native"]

@@ -1,0 +1,14 @@
+[package]
+name = "openkf-render"
+version = "0.1.0"
+edition = "2021"
+description = "Modern Hardware Abstraction Layer (HAL), PSO caching, vertex formats, and material shader translator for OpenKF"
+
+[dependencies]
+glam = "0.29"
+bytemuck = { version = "1.19", features = ["derive"] }
+thiserror = "2.0"
+bitflags = "2.6"
+
+[dev-dependencies]
+

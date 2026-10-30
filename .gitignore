@@ -1,0 +1,14 @@
+/target/
+**/target/
+# Network captures and logs contain Steam authentication tickets: never commit them.
+/captures/
+*.cap
+*.log
+/output/
+/jobs/
+*.pdb
+*.dmp
+imgui.ini
+.vs/
+.vscode/
+.idea/

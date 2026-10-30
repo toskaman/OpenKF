@@ -1,0 +1,13 @@
+[package]
+name = "openkf-mesh"
+version = "0.1.0"
+edition = "2021"
+description = "Static mesh (.usx) parser, kDOP collision, and GPU indirect instancing for OpenKF"
+
+[dependencies]
+glam = { version = "0.29", features = ["bytemuck"] }
+bytemuck = { version = "1.19", features = ["derive"] }
+thiserror = "2.0"
+bitflags = "2.6"
+
+[dev-dependencies]

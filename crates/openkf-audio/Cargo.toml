@@ -1,0 +1,14 @@
+[package]
+name = "openkf-audio"
+version = "0.1.0"
+edition = "2021"
+authors = ["OpenKF Project"]
+license = "GPL-3.0-or-later"
+description = "Spatial 3D Audio Engine and USound WAV processor for OpenKF"
+
+[dependencies]
+glam = "0.29"
+thiserror = "2.0"
+bytemuck = { version = "1.19", features = ["derive"] }
+
+[dev-dependencies]

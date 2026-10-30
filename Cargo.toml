@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/openkf-package",
+    "crates/openkf-vm",
+    "crates/openkf-world",
+    "crates/openkf-physics",
+    "crates/openkf-render",
+    "crates/openkf-audio",
+    "crates/openkf-bsp",
+    "crates/openkf-animation",
+    "crates/openkf-mesh",
+    "crates/openkf-network",
+    "crates/openkf-app",
+    "crates/openkf-viewer",
+    "crates/openkf-netcap",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["OpenKF Project"]
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+glam = "0.29"
+bytemuck = { version = "1.19", features = ["derive"] }
+thiserror = "2.0"
+bitflags = "2.6"
+memmap2 = "0.9"
+rayon = "1.10"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+overflow-checks = false
+incremental = false
+
+[profile.release-fat]
+inherits = "release"
+lto = "fat"

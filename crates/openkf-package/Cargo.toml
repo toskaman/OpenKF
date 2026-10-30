@@ -1,0 +1,15 @@
+[package]
+name = "openkf-package"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+memmap2.workspace = true
+thiserror.workspace = true
+bitflags.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+png = "0.17"

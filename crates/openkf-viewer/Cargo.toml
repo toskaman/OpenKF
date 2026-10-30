@@ -1,0 +1,27 @@
+[package]
+name = "openkf-viewer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OpenKF map viewer: Vulkan (wgpu) renderer for retail Killing Floor maps"
+
+[[bin]]
+name = "openkf-viewer"
+path = "src/main.rs"
+
+[dependencies]
+openkf-package = { path = "../openkf-package" }
+openkf-network = { path = "../openkf-network" }
+openkf-audio = { path = "../openkf-audio" }
+openkf-render = { path = "../openkf-render" }
+wgpu = "22.1"
+winit = "0.30"
+pollster = "0.3"
+bytemuck = { version = "1.19", features = ["derive"] }
+glam = { version = "0.29", features = ["bytemuck"] }
+rayon = "1.10"
+png = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+cpal = "0.15"

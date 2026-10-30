@@ -1,0 +1,17 @@
+[package]
+name = "openkf-bsp"
+version = "0.1.0"
+edition = "2021"
+authors = ["OpenKF Project"]
+license = "GPL-3.0-or-later"
+description = "UModel BSP tree and geometry parser, polygon fan-triangulation, and mesh extraction for OpenKF"
+
+[dependencies]
+glam = "0.29"
+bytemuck = { version = "1.19", features = ["derive"] }
+thiserror = "2.0"
+bitflags = "2.6"
+byteorder = "1.5"
+rayon = { workspace = true }
+
+[dev-dependencies]

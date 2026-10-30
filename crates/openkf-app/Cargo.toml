@@ -1,0 +1,23 @@
+[package]
+name = "openkf-app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "OpenKF"
+path = "src/main.rs"
+
+[dependencies]
+openkf-package = { path = "../openkf-package" }
+openkf-vm = { path = "../openkf-vm" }
+openkf-world = { path = "../openkf-world" }
+openkf-physics = { path = "../openkf-physics" }
+openkf-render = { path = "../openkf-render" }
+openkf-audio = { path = "../openkf-audio" }
+openkf-bsp = { path = "../openkf-bsp" }
+openkf-animation = { path = "../openkf-animation" }
+openkf-mesh = { path = "../openkf-mesh" }
+openkf-network = { path = "../openkf-network" }
+glam = "0.29"
+thiserror = "2.0"
+unicode-normalization = "0.1.25"

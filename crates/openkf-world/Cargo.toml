@@ -1,0 +1,19 @@
+[package]
+name = "openkf-world"
+version = "0.1.0"
+edition = "2021"
+authors = ["OpenKF Project"]
+license = "GPL-3.0-or-later"
+description = "Archetype-based ECS world simulation crate for OpenKF replacing UE2 ULevel"
+
+[dependencies]
+hecs = "0.10"
+glam = "0.29"
+rayon = "1.10"
+thiserror = "2.0"
+bitflags = "2.6"
+byteorder = "1.5"
+openkf-package = { path = "../openkf-package" }
+openkf-bsp = { path = "../openkf-bsp" }
+
+[dev-dependencies]

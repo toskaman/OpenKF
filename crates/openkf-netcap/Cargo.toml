@@ -1,0 +1,13 @@
+[package]
+name = "openkf-netcap"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "UDP relay that records every Killing Floor packet between a client and a server"
+
+[[bin]]
+name = "openkf-netcap"
+path = "src/main.rs"
+
+[dependencies]
