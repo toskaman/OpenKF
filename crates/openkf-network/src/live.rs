@@ -449,11 +449,7 @@ impl LiveClient {
             .uses
             .iter()
             .filter(|u| !u.fname.is_empty())
-            .filter(|u| match crate::download::find_package_file(&self.kf_dir, &u.fname) {
-                None => true,
-                // Same name, other version (e.g. a different server's build of a custom map).
-                Some(p) => p.starts_with(crate::download::download_dir(&self.kf_dir)) && crate::download::package_guid(&p).is_some_and(|g| !g.eq_ignore_ascii_case(&u.guid)),
-            })
+            .filter(|u| crate::download::find_package_by_guid(&self.kf_dir, &u.fname, &u.guid).is_none())
             .map(|u| (u.fname.clone(), u.guid.clone()))
             .collect();
         if missing.is_empty() {

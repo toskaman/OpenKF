@@ -85,25 +85,50 @@ pub fn download_dir(kf_dir: &Path) -> PathBuf {
 /// Standard KF package folders.
 pub const PACKAGE_DIRS: &[&str] = &["System", "Maps", "Textures", "Sounds", "StaticMeshes", "Animations", "Music", "KarmaData"];
 
-/// Retail download cache: `<kf>/Cache/Cache.ini` maps `GUID=FileName.ext`, files are
-/// stored as `<kf>/Cache/<GUID>.uxx`. Returns lower-cased file name -> cached path.
-pub fn retail_cache(kf_dir: &Path) -> &'static HashMap<String, PathBuf> {
-    static CACHE: std::sync::OnceLock<HashMap<String, PathBuf>> = std::sync::OnceLock::new();
+/// Retail download cache: `<kf>/Cache/Cache.ini` maps `<GUID>-<GEN>=FileName.ext`, files
+/// are stored as `<kf>/Cache/<GUID>-<GEN>.uxx`. Index by GUID and by lower-cased file name.
+pub struct RetailCache {
+    pub by_guid: HashMap<String, PathBuf>,
+    pub by_name: HashMap<String, PathBuf>,
+}
+
+pub fn retail_cache_index(kf_dir: &Path) -> &'static RetailCache {
+    static CACHE: std::sync::OnceLock<RetailCache> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
         let dir = kf_dir.join("Cache");
-        let mut m = HashMap::new();
+        let mut c = RetailCache { by_guid: HashMap::new(), by_name: HashMap::new() };
         if let Ok(text) = std::fs::read(dir.join("Cache.ini")) {
             for line in String::from_utf8_lossy(&text).lines() {
-                if let Some((guid, name)) = line.trim().split_once('=') {
-                    let p = dir.join(format!("{}.uxx", guid.trim()));
-                    if guid.trim().len() == 32 && p.is_file() {
-                        m.insert(name.trim().to_ascii_lowercase(), p);
-                    }
+                let Some((key, name)) = line.trim().split_once('=') else { continue };
+                let key = key.trim();
+                let guid = key.split('-').next().unwrap_or("");
+                let p = dir.join(format!("{key}.uxx"));
+                if guid.len() == 32 && p.is_file() {
+                    c.by_guid.insert(guid.to_ascii_uppercase(), p.clone());
+                    c.by_name.insert(name.trim().to_ascii_lowercase(), p);
                 }
             }
         }
-        m
+        c
     })
+}
+
+/// File name -> cached path (latest entry for that name).
+pub fn retail_cache(kf_dir: &Path) -> &'static HashMap<String, PathBuf> {
+    &retail_cache_index(kf_dir).by_name
+}
+
+/// Package for an exact `USES` GUID: retail cache first, then by name.
+pub fn find_package_by_guid(kf_dir: &Path, fname: &str, guid: &str) -> Option<PathBuf> {
+    if let Some(p) = retail_cache_index(kf_dir).by_guid.get(&guid.to_ascii_uppercase()) {
+        return Some(p.clone());
+    }
+    let p = find_package_file(kf_dir, fname)?;
+    // A same-named file of another version is only acceptable from the game folders.
+    if package_guid(&p).is_some_and(|g| !g.eq_ignore_ascii_case(guid)) && !PACKAGE_DIRS.iter().any(|d| p.starts_with(kf_dir.join(d))) {
+        return None;
+    }
+    Some(p)
 }
 
 /// Finds a package file (`KF-Foo.rom`, `Bar.utx`) in the game folders, the retail

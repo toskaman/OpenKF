@@ -32,3 +32,9 @@
 - A capture of OpenKF through `openkf-netcap` showed the server sends DLMGR + WELCOME right after LOGIN. OpenKF was busy downloading the server's ~1-2 GB of custom packages (FastDL) inside the WELCOME handler, so the viewer's 180 s join timeout fired first.
 - Fixes: retail download cache (`<KF>/Cache/Cache.ini`, `<GUID>.uxx`) is searched before downloading; download progress printed live; join wait raised to 900 s. Downloads persist in `%LOCALAPPDATA%\OpenKF\Downloads`, so later joins are fast.
 - TODO: download in a background thread while keeping the connection alive (retail behaviour), and show progress in the HUD.
+
+## Retail cache + first public join (done)
+- First successful join of the public modded server (wave 5, 44 zeds rendered, spectator).
+- Retail cache format fixed: `Cache.ini` keys are `<GUID>-<GEN>`, files `<GUID>-<GEN>.uxx`; lookup is now by exact USES GUID (`find_package_by_guid`), so packages the retail client already downloaded are reused.
+- Open: maps that are not on the HTTP redirect (e.g. KF-BOX -> 404) need UE2 ChannelDownload (CHTYPE_FILE). Needs a retail capture of a channel download to implement exactly.
+- Open: ~25% custom sounds fail to play; downloads should run in the background with a HUD progress bar.
