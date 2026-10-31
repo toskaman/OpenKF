@@ -12,22 +12,27 @@ your legally installed game data (maps, meshes, textures, sounds).
 ![WestLondon road tunnel interior](docs/screenshots/shot-tunnel.png)
 ![Fleshpound close-up](docs/screenshots/shot-fleshpound.png)
 
-## Highlights (v1.9.0)
+## Highlights (v1.10.0)
 
-- **Live multiplayer**: handshake, Steam auth, actor replication, RPCs, movement,
-  firing, reloading, grenades, trader purchases, server travel, auto-reconnect.
-- **Content downloads**: FastDL (HTTP redirect, `.uz2`), the retail download
-  cache (`Cache/Cache.ini`), and in-connection `ChannelDownload` (`CHTYPE_FILE`)
-  for maps missing from the redirect — all in the background with a progress bar.
-- **Combat effects**: particle bursts (blood, muzzle flash, smoke), surface-
-  projected decals, articulated multi-body Karma ragdolls.
+- **Texture artifacts fixed**: mirrored tunnel shells render (were
+  see-through), stale black vertex lighting reads as shadow instead of
+  flat black slabs, and the Fleshpound's amber chest glows.
+- **Live multiplayer**: handshake, Steam auth, actor replication, RPCs,
+  movement, firing, reloading, grenades, trader purchases, server travel,
+  auto-reconnect.
+- **Content downloads**: FastDL (HTTP redirect, `.uz2`), the retail
+  download cache (`Cache/Cache.ini`), and in-connection `ChannelDownload`
+  (`CHTYPE_FILE`) for maps missing from the redirect — all in the
+  background with a progress bar.
+- **Combat effects**: particle bursts (blood, muzzle flash, smoke),
+  surface-projected decals, articulated multi-body Karma ragdolls.
 - **Sound**: 3D positional audio, nested `SoundGroup`s, 2839/2839 custom
-  sounds decode with zero failures.
+  sounds decode with zero failures; decoded cache bounded (1024).
 - **Server browser**: favorites + recents + direct IP with live GameSpy
-  details (hostname, map, players), LAN discovery, an internet list via
-  the Steam Web API, and an in-viewport overlay (F2) — no console needed.
-- **Benchmarks**: headless `--bench` orbit and PresentMon presented-FPS;
-  retail vs OpenKF numbers below.
+  details, LAN discovery, a cached internet list via the Steam Web API
+  (10 min TTL), and an in-viewport overlay (F2) with a details pane.
+- **Benchmarks**: headless `--bench` orbit with skin/upload/render split
+  and PresentMon presented-FPS; retail vs OpenKF numbers below.
 
 ## Performance (real numbers)
 
@@ -89,6 +94,20 @@ openkf-viewer KF-WestLondon --bench 300 --size 1280x720
 
 Downloads (FastDL / channel / retail cache) land in
 `%LOCALAPPDATA%\OpenKF\Downloads` — never inside the game install.
+
+### Internet server list (Steam API key)
+
+LAN servers need no setup. The internet list goes through the Steam Web
+API, which needs a free personal key (one per user, no quota to worry
+about):
+
+1. Sign in at <https://steamcommunity.com/dev/apikey> and create a key
+   (any domain works, e.g. `localhost`).
+2. Save it to `%LOCALAPPDATA%\OpenKF\steam_api_key.txt` (or export
+   `OPENKF_STEAM_API_KEY`).
+3. Type `net` in the browser (`openkf-viewer --browse`, or F2 in-game
+   for favorites / recents / LAN). Results are cached for 10 minutes
+   (`netcache.txt`); `net!` forces a refresh.
 
 ## Layout
 

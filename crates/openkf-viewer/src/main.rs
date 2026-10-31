@@ -484,19 +484,26 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
         r.render(&device, &queue, &view, w, h, &cam);
         device.poll(wgpu::Maintain::Wait);
         let mut dts: Vec<f64> = Vec::with_capacity(args.bench);
+        let (mut skin_ms, mut up_ms, mut gpu_ms) = (0.0f64, 0.0f64, 0.0f64);
         let total = Instant::now();
         for i in 0..args.bench {
             let mut c = Camera { pos: cam.pos, yaw: cam.yaw + i as f32 * std::f32::consts::TAU / args.bench as f32, pitch: cam.pitch, fov_y: cam.fov_y };
             let f0 = Instant::now();
             let vv = zeds::skin_all(&mut scene.actors, args.time + i as f32 / 60.0);
+            let t1 = Instant::now();
             r.update_actors(&queue, &vv);
             if !scene.props.is_empty() {
                 let pv = props::transform_all(&scene.props);
                 r.update_props(&queue, &pv);
             }
+            let t2 = Instant::now();
             r.render(&device, &queue, &view, w, h, &c);
             device.poll(wgpu::Maintain::Wait);
-            dts.push(f0.elapsed().as_secs_f64() * 1e3);
+            let t3 = Instant::now();
+            skin_ms += (t1 - f0).as_secs_f64() * 1e3;
+            up_ms += (t2 - t1).as_secs_f64() * 1e3;
+            gpu_ms += (t3 - t2).as_secs_f64() * 1e3;
+            dts.push((t3 - f0).as_secs_f64() * 1e3);
             let _ = &mut c;
         }
         dts.sort_by(|a, b| a.total_cmp(b));
@@ -504,11 +511,13 @@ fn screenshot(args: &Args, rp: Option<&replay::Replay>, live: Option<&std::sync:
         let avg = sum / dts.len() as f64;
         let p50 = dts[dts.len() / 2];
         let p95 = dts[(dts.len() as f64 * 0.95) as usize];
+        let n = args.bench as f64;
         println!(
-            "[Bench] {} frames in {:.1} s: {:.0} FPS avg | frame ms avg {avg:.2} p50 {p50:.2} p95 {p95:.2} | {} draws {} tris",
+            "[Bench] {} frames in {:.1} s: {:.0} FPS avg | frame ms avg {avg:.2} p50 {p50:.2} p95 {p95:.2} (skin {:.2} upload {:.2} render+wait {:.2}) | {} draws {} tris",
             args.bench,
             total.elapsed().as_secs_f64(),
             1000.0 / avg,
+            skin_ms / n, up_ms / n, gpu_ms / n,
             r.draw_calls(),
             r.triangles
         );

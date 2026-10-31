@@ -124,18 +124,102 @@ pub fn steam_api_key() -> Option<String> {
     std::fs::read_to_string(p).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
 }
 
+/// Internet-list cache (`netcache.txt` in the data dir): fetching the Steam
+/// list plus a GameSpy query per server takes a while, so fresh results are
+/// reused for [`NETCACHE_TTL_SECS`]. TSV: `# <unix_secs>` header, then
+/// `addr` + tab + `hostname|mapname|maptitle|gametype|num|max|gamever|hostport`
+/// (`|` escaped as `/`; empty status = silent server).
+pub const NETCACHE_TTL_SECS: u64 = 600;
+
+type NetRow = (String, Option<openkf_network::browser::GameSpyStatus>);
+
+fn esc(s: &str) -> String {
+    s.replace('|', "/").replace('\t', " ").replace('\n', " ")
+}
+
+fn netcache_save_to(path: &std::path::Path, servers: &[NetRow]) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut text = format!("# {now}\n");
+    for (addr, st) in servers {
+        text.push_str(addr);
+        text.push('\t');
+        if let Some(st) = st {
+            text.push_str(&format!("{}|{}|{}|{}|{}|{}|{}|{}", esc(&st.hostname), esc(&st.mapname), esc(&st.maptitle), esc(&st.gametype), st.numplayers, st.maxplayers, esc(&st.gamever), st.hostport));
+        }
+        text.push('\n');
+    }
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+    let _ = std::fs::write(path, text);
+}
+
+fn netcache_load_from(path: &std::path::Path, max_age_secs: u64) -> Option<Vec<NetRow>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let stamp: u64 = lines.next()?.strip_prefix("# ")?.trim().parse().ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let age = now.saturating_sub(stamp);
+    if age > max_age_secs {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (addr, st) = match line.split_once('\t') {
+            Some((a, s)) => (a.trim(), s.trim()),
+            None => (line, ""),
+        };
+        if addr.is_empty() {
+            continue;
+        }
+        let status = if st.is_empty() {
+            None
+        } else {
+            let f: Vec<&str> = st.split('|').collect();
+            if f.len() != 8 {
+                continue;
+            }
+            Some(openkf_network::browser::GameSpyStatus {
+                hostname: f[0].into(), mapname: f[1].into(), maptitle: f[2].into(), gametype: f[3].into(),
+                numplayers: f[4].parse().unwrap_or(0), maxplayers: f[5].parse().unwrap_or(0),
+                gamever: f[6].into(), hostport: f[7].parse().unwrap_or(0),
+            })
+        };
+        out.push((addr.to_string(), status));
+    }
+    Some(out)
+}
+
 /// Internet servers via the Steam Web API (needs a key, see [`steam_api_key`]).
 /// Each listed address is GameSpy-queried for details (parallel); silent ones
-/// are kept with no details. Returns (servers, error).
-pub fn net(limit: u32) -> (Vec<(String, Option<openkf_network::browser::GameSpyStatus>)>, Option<String>) {
+/// are kept with no details. Returns (servers, error, cache age in seconds
+/// when served from the cache).
+pub fn net(limit: u32) -> (Vec<NetRow>, Option<String>, Option<u64>) {
+    let cache = dir().join("netcache.txt");
+    if let Some(rows) = netcache_load_from(&cache, NETCACHE_TTL_SECS) {
+        let age = cache_age_secs(&cache).unwrap_or(0);
+        return (rows.into_iter().take(limit as usize).collect(), None, Some(age));
+    }
+    net_refresh(limit)
+}
+
+/// Bypasses the cache: always fetches the Steam list, re-queries details,
+/// and rewrites the cache. Returns (servers, error).
+pub fn net_refresh(limit: u32) -> (Vec<NetRow>, Option<String>, Option<u64>) {
     let Some(key) = steam_api_key() else {
-        return (Vec::new(), Some("no Steam API key: set OPENKF_STEAM_API_KEY or save one to %LOCALAPPDATA%\\OpenKF\\steam_api_key.txt (free at steamcommunity.com/dev/apikey)".into()));
+        // No key: a stale cache is better than nothing.
+        if let Some(rows) = netcache_load_from(&dir().join("netcache.txt"), u64::MAX) {
+            return (rows.into_iter().take(limit as usize).collect(), None, cache_age_secs(&dir().join("netcache.txt")));
+        }
+        return (Vec::new(), Some("no Steam API key: set OPENKF_STEAM_API_KEY or save one to %LOCALAPPDATA%\\OpenKF\\steam_api_key.txt (free at steamcommunity.com/dev/apikey)".into()), None);
     };
     let addrs = match openkf_network::browser::SteamServerQuery::fetch_steam_web_list(&key, openkf_network::browser::KILLING_FLOOR_APP_ID, limit) {
         Ok(a) => a,
-        Err(e) => return (Vec::new(), Some(format!("Steam Web API: {e}"))),
+        Err(e) => return (Vec::new(), Some(format!("Steam Web API: {e}")), None),
     };
-    let mut out: Vec<(String, Option<openkf_network::browser::GameSpyStatus>)> = Vec::new();
+    let mut out: Vec<NetRow> = Vec::new();
     std::thread::scope(|s| {
         let hs: Vec<_> = addrs.iter().map(|a| s.spawn(|| (a.to_string(), details(&a.to_string())))).collect();
         for h in hs {
@@ -144,11 +228,30 @@ pub fn net(limit: u32) -> (Vec<(String, Option<openkf_network::browser::GameSpyS
     });
     // Answering servers first, then the silent ones.
     out.sort_by_key(|(_, st)| st.is_none());
-    (out, None)
+    netcache_save_to(&dir().join("netcache.txt"), &out);
+    (out, None, None)
+}
+
+fn cache_age_secs(path: &std::path::Path) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let stamp: u64 = text.lines().next()?.strip_prefix("# ")?.trim().parse().ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    Some(now.saturating_sub(stamp))
+}
+
+/// One-line row summary + details-pane line for a queried server.
+pub fn detail_lines(st: &openkf_network::browser::GameSpyStatus) -> (String, String) {
+    let row = format!("{} | {} | {}/{}", st.hostname, st.mapname, st.numplayers, st.maxplayers);
+    let title = if st.maptitle.is_empty() { st.mapname.clone() } else { st.maptitle.clone() };
+    let mut pane = format!("{} | {} | {}/{}", st.gametype, title, st.numplayers, st.maxplayers);
+    if !st.gamever.is_empty() {
+        pane.push_str(&format!(" | v{}", st.gamever));
+    }
+    (row, pane)
 }
 
 fn detail_line(st: &openkf_network::browser::GameSpyStatus) -> String {
-    format!("{} | {} | {}/{} players", st.hostname, st.mapname, st.numplayers, st.maxplayers)
+    format!("{} players", detail_lines(st).0)
 }
 
 /// Interactive pick: numbered favorites + recents + LAN, or a typed `ip:port`.
@@ -221,7 +324,7 @@ pub fn pick() -> Option<String> {
         if n == 0 {
             println!("(no saved servers yet)");
         }
-        println!("Enter a number, an ip:port, 'lan' to scan the local network, 'net' for the Steam internet list, 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip-or-name>' to remove, or empty to quit.");
+        println!("Enter a number, an ip:port, 'lan' to scan the local network, 'net' for the Steam internet list ('net!' forces a refresh), 'fav <num-or-ip> <name>' to save, 'unfav <num-or-ip-or-name>' to remove, or empty to quit.");
         print!("> ");
         let _ = std::io::stdout().flush();
         let mut line = String::new();
@@ -240,13 +343,16 @@ pub fn pick() -> Option<String> {
             }
             continue;
         }
-        if line.eq_ignore_ascii_case("net") {
+        if line.eq_ignore_ascii_case("net") || line.eq_ignore_ascii_case("net!") {
+            let force = line.ends_with('!');
             println!("fetching Steam internet list...");
-            let (servers, err) = net(50);
+            let (servers, err, cached) = if force { net_refresh(50) } else { net(50) };
             if let Some(e) = err {
                 println!("{e}");
             } else if servers.is_empty() {
                 println!("no internet servers listed");
+            } else if let Some(age) = cached {
+                println!("{} servers (cached {}s ago)", servers.len(), age);
             }
             net_servers = servers;
             continue;
@@ -304,5 +410,36 @@ mod tests {
         assert!(!valid_addr("127.0.0.1"));
         assert!(!valid_addr("127.0.0.1:abc"));
         assert!(!valid_addr(""));
+    }
+
+    #[test]
+    fn netcache_roundtrip_and_ttl() {
+        let dir = std::env::temp_dir().join(format!("openkf-netcache-test-{}", std::process::id()));
+        let path = dir.join("netcache.txt");
+        let st = || openkf_network::browser::GameSpyStatus {
+            hostname: "H|T".into(), mapname: "KF-B".into(), maptitle: "".into(), gametype: "G".into(),
+            numplayers: 3, maxplayers: 6, gamever: "3339".into(), hostport: 7717,
+        };
+        let rows = vec![("1.2.3.4:7707".to_string(), Some(st())), ("5.6.7.8:7707".to_string(), None)];
+        netcache_save_to(&path, &rows);
+        let back = netcache_load_from(&path, NETCACHE_TTL_SECS).expect("fresh cache loads");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].1.as_ref().unwrap().hostname, "H/T"); // '|' escaped
+        assert_eq!(back[0].1.as_ref().unwrap().numplayers, 3);
+        assert!(back[1].1.is_none());
+        std::fs::write(&path, "# 1\n1.2.3.4:7707\t\n").unwrap();
+        assert!(netcache_load_from(&path, NETCACHE_TTL_SECS).is_none(), "expired cache rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detail_lines_fallbacks() {
+        let st = openkf_network::browser::GameSpyStatus {
+            hostname: "H".into(), mapname: "KF-B".into(), maptitle: "".into(), gametype: "G".into(),
+            numplayers: 3, maxplayers: 6, gamever: "".into(), hostport: 0,
+        };
+        let (row, pane) = detail_lines(&st);
+        assert_eq!(row, "H | KF-B | 3/6");
+        assert_eq!(pane, "G | KF-B | 3/6"); // empty title/version fall back cleanly
     }
 }

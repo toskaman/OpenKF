@@ -6,17 +6,18 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
-/// One row: address, source tag, optional live details line.
+/// One row: address, source tag, optional live details line + details-pane line.
 #[derive(Debug, Clone)]
 pub struct Row {
     pub addr: String,
     pub tag: String,
     pub info: Option<String>,
+    pub detail: Option<String>,
 }
 
 enum Msg {
-    Details(Vec<(String, Option<String>)>),
-    Lan(Vec<(String, String)>),
+    Details(Vec<(String, Option<(String, String)>)>),
+    Lan(Vec<(String, String, String)>),
 }
 
 pub struct BrowserUi {
@@ -34,10 +35,10 @@ impl BrowserUi {
         let rec = super::browser::recent();
         let mut rows = Vec::new();
         for e in &favs {
-            rows.push(Row { addr: e.addr.clone(), tag: format!("fav {}", e.name), info: None });
+            rows.push(Row { addr: e.addr.clone(), tag: format!("fav {}", e.name), info: None, detail: None });
         }
         for e in rec.iter().filter(|e| !favs.iter().any(|f| f.addr == e.addr)) {
-            rows.push(Row { addr: e.addr.clone(), tag: "recent".into(), info: None });
+            rows.push(Row { addr: e.addr.clone(), tag: "recent".into(), info: None, detail: None });
         }
         let (tx, rx) = mpsc::channel();
         let mut ui = Self { rows, cursor: 0, rx, tx, loading: true, scanning: false };
@@ -55,7 +56,7 @@ impl BrowserUi {
                 let hs: Vec<_> = addrs.iter().map(|a| s.spawn(|| (a.clone(), super::browser::details(a)))).collect();
                 for h in hs {
                     let (addr, st) = h.join().unwrap();
-                    out.push((addr, st.map(|st| format!("{} | {} | {}/{}", st.hostname, st.mapname, st.numplayers, st.maxplayers))));
+                    out.push((addr, st.map(|st| super::browser::detail_lines(&st))));
                 }
             });
             let _ = tx.send(Msg::Details(out));
@@ -67,17 +68,26 @@ impl BrowserUi {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Details(v) => {
-                    for (addr, info) in v {
+                    for (addr, both) in v {
                         if let Some(r) = self.rows.iter_mut().find(|r| r.addr == addr) {
-                            r.info = Some(info.unwrap_or_else(|| "(offline)".into()));
+                            match both {
+                                Some((info, detail)) => {
+                                    r.info = Some(info);
+                                    r.detail = Some(detail);
+                                }
+                                None => {
+                                    r.info = Some("(offline)".into());
+                                    r.detail = None;
+                                }
+                            }
                         }
                     }
                     self.loading = false;
                 }
                 Msg::Lan(v) => {
-                    for (addr, info) in v {
+                    for (addr, info, detail) in v {
                         if !self.rows.iter().any(|r| r.addr == addr) {
-                            self.rows.push(Row { addr, tag: "lan".into(), info: Some(info) });
+                            self.rows.push(Row { addr, tag: "lan".into(), info: Some(info), detail: Some(detail) });
                         }
                     }
                     self.scanning = false;
@@ -95,7 +105,10 @@ impl BrowserUi {
         std::thread::spawn(move || {
             let found = super::browser::lan()
                 .into_iter()
-                .map(|(a, st)| (a, format!("{} | {} | {}/{}", st.hostname, st.mapname, st.numplayers, st.maxplayers)))
+                .map(|(a, st)| {
+                    let (info, detail) = super::browser::detail_lines(&st);
+                    (a, info, detail)
+                })
                 .collect();
             let _ = tx.send(Msg::Lan(found));
         });
@@ -128,8 +141,20 @@ impl BrowserUi {
         while out.len() < 5 {
             out.push(String::new());
         }
-        let status = if self.scanning { "scanning LAN..." } else if self.loading { "querying..." } else { "ready" };
-        out.push(format!("{status} | {} saved", self.rows.len()));
+        // Footer doubles as the details pane: status while busy, otherwise the
+        // selected server's full details (gametype, map title, version).
+        let mut footer = if self.scanning {
+            "scanning LAN...".to_string()
+        } else if self.loading {
+            "querying...".to_string()
+        } else {
+            match self.rows.get(self.cursor).and_then(|r| r.detail.clone()) {
+                Some(d) => format!("> {d}"),
+                None => "ready".into(),
+            }
+        };
+        footer.truncate(80);
+        out.push(footer);
         out
     }
 }
@@ -141,7 +166,7 @@ mod tests {
     fn ui(n: usize) -> BrowserUi {
         let (tx, rx) = mpsc::channel();
         BrowserUi {
-            rows: (0..n).map(|i| Row { addr: format!("10.0.0.{i}:7707"), tag: "recent".into(), info: Some("H | M | 1/6".into()) }).collect(),
+            rows: (0..n).map(|i| Row { addr: format!("10.0.0.{i}:7707"), tag: "recent".into(), info: Some("H | M | 1/6".into()), detail: Some(format!("KFGame | Manor | 1/6 | v3339")) }).collect(),
             cursor: 0,
             rx,
             tx,
@@ -177,14 +202,38 @@ mod tests {
     fn pump_merges_details_and_lan() {
         let mut u = ui(1);
         u.rows[0].info = None;
+        u.rows[0].detail = None;
         u.loading = true;
-        u.tx.send(Msg::Details(vec![("10.0.0.0:7707".into(), Some("H | M | 2/6".into()))])).unwrap();
+        let payload = vec![("10.0.0.0:7707".to_string(), Some(("H | M | 2/6".to_string(), "G | T | 2/6".to_string())))];
+        u.tx.send(Msg::Details(payload)).unwrap();
         u.scanning = true;
-        u.tx.send(Msg::Lan(vec![("10.0.0.9:7707".into(), "L | M | 0/6".into())])).unwrap();
+        u.tx.send(Msg::Lan(vec![("10.0.0.9:7707".into(), "L | M | 0/6".into(), "G | T | 0/6".into())])).unwrap();
         u.pump();
         assert_eq!(u.rows[0].info.as_deref(), Some("H | M | 2/6"));
+        assert_eq!(u.rows[0].detail.as_deref(), Some("G | T | 2/6"));
         assert!(!u.loading && !u.scanning);
         assert_eq!(u.rows.len(), 2);
         assert_eq!(u.rows[1].tag, "lan");
+        assert_eq!(u.rows[1].detail.as_deref(), Some("G | T | 0/6"));
+    }
+
+    #[test]
+    fn footer_is_details_pane_when_ready() {
+        let u = ui(2);
+        let lines = u.lines();
+        assert_eq!(lines.len(), 6);
+        assert!(lines[5].starts_with("> KFGame"), "footer: {}", lines[5]);
+    }
+
+    #[test]
+    fn footer_shows_status_while_busy() {
+        let (tx, rx) = mpsc::channel();
+        let mut u = BrowserUi { rows: vec![], cursor: 0, rx, tx, loading: true, scanning: false };
+        assert_eq!(u.lines()[5], "querying...");
+        u.loading = false;
+        u.scanning = true;
+        assert_eq!(u.lines()[5], "scanning LAN...");
+        u.scanning = false;
+        assert_eq!(u.lines()[5], "ready");
     }
 }

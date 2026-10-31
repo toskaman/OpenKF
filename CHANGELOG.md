@@ -2,7 +2,7 @@
 
 All notable changes to OpenKF. Dates are 2026.
 
-## Unreleased (toward v1.10.0)
+## v1.10.0 — Texture-artifact fixes, browser cache + details pane, lower RAM (October 31)
 
 ### Fixed
 - **BSP floors/walls no longer vanish**: section vertex order varies per
@@ -51,6 +51,14 @@ All notable changes to OpenKF. Dates are 2026.
   UV/position bounds) for mesh triage.
 - `is_mirrored` unit tests + retail test asserting WestLondon's mirrored
   tunnel shells.
+- Internet server list cache: Steam results + GameSpy details are reused
+  for 10 minutes (`netcache.txt`); `net!` forces a refresh, and a stale
+  cache still serves when no API key is configured.
+- F2 browser details pane: the footer shows the selected server's
+  gametype, map title and version once querying finishes.
+- Benchmark split timers: `[Bench]` now reports skin / upload /
+  render+wait ms separately (live .240: 1.6 / 1.6 / 4.1 ms at 99 actors).
+- README documents the Steam API key setup for the internet list.
 
 ## v1.9.0 — Articulated ragdolls, decals, in-game browser, internet list (October 30)
 

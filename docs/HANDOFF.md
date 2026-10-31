@@ -1,4 +1,29 @@
-# Handoff (2026-10-30, night — v1.10.0 in progress)
+# Handoff (2026-10-31 — v1.10.0 done)
+
+## Done this session (v1.10.0)
+
+- **Fleshpound chest glow**: actor slots shared one opaque pipeline; the
+  amber `FinalBlend` section drew black. Per-section pipelines now
+  (opaque/alpha/additive/modulate). Verified by close-up screenshot.
+- **Sky "black quad"** (WestLondon church): `StaticMeshInstance` color
+  streams with exactly-zero verts (lighting never rebuilt). Vertex-color
+  shading floored at 45% of approx shading — shadowed bricks, not void.
+- **Tunnel interior** (WestLondon): mapper mirrors shells
+  (`DrawScale3D.y < 0`); the unused `is_mirrored` helper is now wired to
+  reverse winding. Brick tunnel interior renders. Unit + retail tests.
+- **RAM**: live public-server peak 641 MB ≈ retail (was 1085);
+  solo 679 MB (was 713). Bounded sound cache (1024 FIFO) + CPU upload
+  release.
+- **Frame profile**: `[Bench]` split (skin/upload/render+wait); live
+  .240: 1.6/1.6/4.1 ms at 99 actors.
+- **Browser**: `netcache.txt` (10 min TTL, `net!` refresh, stale cache
+  without key), F2 details pane (gametype/map/version in footer), README
+  key docs.
+- Investigated, left faithful: Manor treetop quad (dense authored UV
+  region, in-crown — retail-identical), WestLondon skybox ceiling band
+  (`DefaultTexture` + lightmap — real skybox geometry).
+- Retail hands-off: the user's live match ran all night — no retail
+  capture/kill/minimize; custom-spawn capture still pending.
 
 ## Texture fix (white floors): root cause + fix
 
@@ -71,15 +96,20 @@
   no suspicious diff, no repro. Verdict: environmental fallout, not a
   code bug. If it ever recurs, suspect GPU/ETW wedging first.
 
-## Suggested next steps (updated)
+## Suggested next steps (updated, v1.10.0)
 
-1. Profile the live frame time (95-99 FPS vs 201 in v1.8.0): find whether
-   ragdoll articulation, projected decals, or particles dominate, and
-   budget accordingly (fewer active ragdolls, decal LOD).
+1. ~~Profile the live frame time~~ — done: `[Bench]` reports skin /
+   upload / render+wait (live .240: 1.6 / 1.6 / 4.1 ms at 99 actors).
+   Upload batching (fewer `write_buffer`s) is the remaining CPU item.
 2. Custom-gametype spawn: trace what `ServerPerks`-style servers need
-   after `SelectVeterancy` (retail packet capture of a working client).
-3. Steam Web API key UX: document where to get a key, cache the list.
-4. 3D browser polish (mouse, server details pane) if time allows.
+   after `SelectVeterancy` (**retail packet capture still needed** —
+   blocked 2026-10-31: retail busy in a live match, hands off).
+3. ~~Steam Web API key UX~~ — done: README documents the key setup,
+   `netcache.txt` caches the list (10 min TTL), `net!` refreshes.
+4. ~~Browser details pane~~ — done: F2 footer shows the selected
+   server's gametype/map/version. Internet list in F2 still open.
+5. Clean-room benchmark refresh (scripted orbit + PresentMon, retail
+   idle) to replace the v1.9.0 table + v1.10.0 interim notes.
 
 ---
 

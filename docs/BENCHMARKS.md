@@ -50,6 +50,23 @@ with the bot moving, firing and killing (2 kills), 0 sound/decode failures.
 Previous run (v1.8.0, evening): solo 651 FPS / 0.39 s / 835 MB; live 201 FPS
 at 162 actors / 1084 MB; retail 3.26 s / 596 MB.
 
+## Interim (v1.10.0, 2026-10-31 — clean FPS re-run pending, retail busy)
+
+- Live RAM (public server `185.97.253.240:7810`, custom map
+  KF-TheWolfLair, 60 s soak, wave 10, 343 actors, 6877 sounds, 0 sound
+  failures): **peak 641 MB** — on par with retail's 597–651 MB solo,
+  down from 1085 MB (bounded sound cache + CPU upload release).
+- Solo headless peak RSS: **679 MB** (was 713 MB).
+- Live frame split (`--bench` orbit, 99 actors, 464 draws): skin 1.62 ms
+  + upload 1.64 ms + render+wait 4.14 ms (135 FPS). The render+wait leg
+  is inflated here — a retail match was running on the same GPU during
+  the run; the CPU-side split (skin/upload) stands.
+- FPS cap (`--fps`, default 120): live windowed went from 29.6% CPU at
+  218 FPS (uncapped) to **17.4% at 117 FPS** (retail: 5.8% at its
+  120 hard cap).
+- Full clean-room numbers (scripted orbit + PresentMon, retail idle)
+  will refresh the table above in the next run.
+
 ## Presented FPS (PresentMon 2.6.0, 20 s each, windowed)
 
 | Client | Scene | Presents | FPS avg | Frame p50 | Frame p95 | Frame p99 |
